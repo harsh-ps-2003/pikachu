@@ -1,0 +1,129 @@
+syntax = "proto3";
+
+package chord;
+
+service ChordNode {
+    // Core DHT operations
+    rpc Lookup (LookupRequest) returns (LookupResponse);
+    rpc Put (PutRequest) returns (PutResponse);
+    rpc Get (GetRequest) returns (GetResponse);
+    
+    // Chord maintenance operations
+    rpc Join (JoinRequest) returns (JoinResponse);
+    rpc Notify (NotifyRequest) returns (NotifyResponse);
+    rpc Stabilize (StabilizeRequest) returns (StabilizeResponse);
+    rpc FindSuccessor (FindSuccessorRequest) returns (FindSuccessorResponse);
+    rpc GetPredecessor (GetPredecessorRequest) returns (GetPredecessorResponse);
+    
+    // Health check
+    rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+}
+
+message NodeInfo {
+    bytes node_id = 1;
+    string address = 2;  // gRPC address of the node
+}
+
+// Core DHT Operations
+message PutRequest {
+    bytes key = 1;
+    bytes value = 2;
+    NodeInfo requesting_node = 3;
+}
+
+message PutResponse {
+    bool success = 1;
+    string error = 2;
+}
+
+message GetRequest {
+    bytes key = 1;
+    NodeInfo requesting_node = 2;
+}
+
+message GetResponse {
+    bytes value = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+message LookupRequest {
+    bytes key = 1;
+    NodeInfo requesting_node = 2;
+}
+
+message LookupResponse {
+    NodeInfo responsible_node = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+// Chord Maintenance Operations
+message FindSuccessorRequest {
+    bytes id = 1;
+    NodeInfo requesting_node = 2;
+}
+
+message FindSuccessorResponse {
+    NodeInfo successor = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+message GetPredecessorRequest {
+    NodeInfo requesting_node = 1;
+}
+
+message GetPredecessorResponse {
+    NodeInfo predecessor = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+message JoinRequest {
+    NodeInfo joining_node = 1;
+}
+
+message JoinResponse {
+    NodeInfo successor = 1;
+    NodeInfo predecessor = 2;
+    repeated KeyValue transferred_data = 3;
+    bool success = 4;
+    string error = 5;
+}
+
+message StabilizeRequest {
+    NodeInfo requesting_node = 1;
+}
+
+message StabilizeResponse {
+    NodeInfo predecessor = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+message NotifyRequest {
+    NodeInfo predecessor = 1;
+}
+
+message NotifyResponse {
+    bool accepted = 1;
+    string error = 2;
+}
+
+// Health Check
+message HeartbeatRequest {
+    NodeInfo sender = 1;
+    uint64 timestamp = 2;
+}
+
+message HeartbeatResponse {
+    bool alive = 1;
+    uint64 timestamp = 2;
+}
+
+// Utility Messages
+message KeyValue {
+    bytes key = 1;
+    bytes value = 2;
+}
