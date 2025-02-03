@@ -22,9 +22,6 @@ pub enum NetworkError {
     
     #[error("Peer unreachable: {0}")]
     PeerUnreachable(String),
-    
-    #[error("Transport error: {0}")]
-    TransportError(String),
 }
 
 #[derive(Error, Debug)]

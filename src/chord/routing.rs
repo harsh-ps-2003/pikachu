@@ -1,4 +1,4 @@
-use crate::chord::{NodeId, CHORD_PROTOCOL};
+use crate::chord::{types::NodeId, CHORD_PROTOCOL};
 use libp2p::{
     core::connection::ConnectionId,
     swarm::{NetworkBehaviour, NotifyHandler, OneShotHandler, PollParameters, ToSwarm},

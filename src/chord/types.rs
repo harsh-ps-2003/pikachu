@@ -83,11 +83,14 @@ impl From<PeerId> for NodeId {
 
 pub struct ChordState {
     pub node_id: NodeId,
+    pub grpc_port: u16,  // Each node's gRPC server port
+    pub address: String, // Format: "http://127.0.0.1:{grpc_port}"
     pub predecessor: Option<NodeId>,
     pub successor: Option<NodeId>,
     pub successor_list: Vec<NodeId>,
     pub finger_table: Vec<Option<NodeId>>,
     pub storage: HashMap<Key, Value>,
+    pub node_addresses: HashMap<NodeId, String>,  // Mapping of NodeId to gRPC addresses
 }
 
 /// Key type for storing data in the DHT

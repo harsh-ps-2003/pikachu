@@ -6,6 +6,7 @@ authors = ["Harsh Pratap Singh <harshpratapsingh8210@gmail.com>"]
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
+tonic = "0.12.3"
 clap = { version = "4.1", features = ["derive"] }
 libp2p = { version = "0.53", features = ["tcp", "dns", "async-std", "noise", "yamux"] }
 async-trait = "0.1.85"

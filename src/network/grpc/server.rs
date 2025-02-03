@@ -1,5 +1,6 @@
 use tonic::{Request, Response, Status};
-use crate::chord::ChordNode;
+use crate::network::messages::message::{LookupRequest, ReplicateRequest, ReplicateResponse};
+use crate::chord::types::{Key, Value};
 use crate::proto::chord::{self, chord_node_server::ChordNodeServer};
 
 pub struct ChordGrpcServer {
@@ -7,7 +8,7 @@ pub struct ChordGrpcServer {
 }
 
 #[tonic::async_trait]
-impl chord_node_server::ChordNode for ChordGrpcServer {
+impl server::ChordNode for ChordGrpcServer {
     async fn lookup(
         &self,
         request: Request<chord::LookupRequest>,
@@ -25,6 +26,26 @@ impl chord_node_server::ChordNode for ChordGrpcServer {
                 error: e.to_string(),
             })),
         }
+    }
+
+    async fn replicate(
+        &self,
+        request: Request<ReplicateRequest>,
+    ) -> Result<Response<ReplicateResponse>, Status> {
+        let req = request.into_inner();
+        
+        // Store all received key-value pairs
+        for kv in req.data {
+            self.chord_node.put(
+                Key(kv.key),
+                Value(kv.value)
+            ).await.map_err(|e| Status::internal(e.to_string()))?;
+        }
+        
+        Ok(Response::new(ReplicateResponse {
+            success: true,
+            error: String::new(),
+        }))
     }
 
     // Implement other RPCs...

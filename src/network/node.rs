@@ -16,6 +16,7 @@ use tokio::sync::mpsc;
 use tokio::{io, select, time::sleep};
 use crate::chord::{routing::{ChordRoutingBehaviour, ChordRoutingEvent}, types::NodeId};
 use crate::network::client::ChordGrpcClient;
+use crate::network::server::ChordGrpcServer;
 
 #[derive(NetworkBehaviour)]
 struct PeerBehaviour {
@@ -30,13 +31,24 @@ pub struct ChordPeer {
 
 impl ChordPeer {
     pub async fn new(config: PeerConfig) -> Result<Self, NetworkError> {
+        let grpc_port = config.grpc_port.unwrap_or_else(|| get_random_port());
+        let grpc_addr = format!("http://127.0.0.1:{}", grpc_port);
+        
         let swarm = create_swarm()?;
         let peer_id = swarm.local_peer_id();
-        
-        // Create NodeId from PeerId
         let node_id = NodeId::from_peer_id(peer_id);
         
-        let (chord_handle, chord_actor) = ChordHandle::new(node_id);
+        let (chord_handle, chord_actor) = ChordHandle::new(
+            node_id,
+            grpc_port,
+            grpc_addr,
+        );
+        
+        // Start the gRPC server
+        let server = ChordGrpcServer::new(chord_handle.clone());
+        tokio::spawn(async move {
+            server.serve(format!("127.0.0.1:{}", grpc_port)).await
+        });
         
         // Start the chord actor
         tokio::spawn(async move {
@@ -126,16 +138,22 @@ impl ChordPeer {
     }
 
     async fn handle_discovered_peer(&mut self, peer_id: PeerId, addr: Multiaddr) -> Result<(), NetworkError> {
-        // Convert PeerId to NodeId for Chord operations
         let node_id = NodeId::from_peer_id(&peer_id);
+        
+        // Extract gRPC port from multiaddr (assuming it's included in peer discovery)
+        if let Some(grpc_port) = extract_grpc_port(&addr) {
+            let grpc_addr = format!("http://127.0.0.1:{}", grpc_port);
+            
+            // Update the node's address mapping
+            self.chord_handle.update_node_address(node_id, grpc_addr).await?;
+        }
         
         // Add to Chord routing
         self.swarm.behaviour_mut().chord_routing.handle_peer_discovered(peer_id);
         
         // Notify Chord actor about the new node
-        if let Err(e) = self.chord_handle.notify(node_id).await {
-            warn!("Failed to notify Chord actor about new peer: {}", e);
-        }
+        self.chord_handle.notify(node_id).await?;
+        
         Ok(())
     }
 }
@@ -161,4 +179,20 @@ fn create_swarm() -> Result<Swarm<PeerBehaviour>, Box<dyn StdError>> {
         .build();
 
     Ok(swarm)
+}
+
+// Helper function to extract gRPC port from multiaddr
+fn extract_grpc_port(addr: &Multiaddr) -> Option<u16> {
+    for proto in addr.iter() {
+        if let Protocol::Tcp(port) = proto {
+            return Some(port);
+        }
+    }
+    None
+}
+
+// Helper function to get a random available port
+fn get_random_port() -> u16 {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.local_addr().unwrap().port()
 }

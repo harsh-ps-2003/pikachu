@@ -1,6 +1,7 @@
 use tokio::sync::{mpsc, oneshot};
 use crate::{error::ChordError, chord::types::{NodeId, Key, Value, ChordState}, chord::{FINGER_TABLE_SIZE, SUCCESSOR_LIST_SIZE}};
-use crate::network::messages::message::message::*;
+use crate::network::messages::chord::PutRequest;
+use crate::network::grpc::client::ChordGrpcClient;
 use std::collections::HashMap;
 use log::{debug, info, warn};
 
@@ -208,18 +209,19 @@ impl ChordActor {
             self.state.storage.insert(key, value);
             Ok(())
         } else {
-            // Forward the request to the responsible node
-            let message = Message {
-                nonce: generate_nonce(),
-                payload: Some(Payload::LookupRequest(LookupRequest {
-                    key: key.0,
-                    requesting_node: self.state.node_id.to_bytes().to_vec(),
-                    ..Default::default()
-                })),
-            };
+            // Forward the request to the responsible node using gRPC
+            let mut client = ChordGrpcClient::new(self.get_node_address(responsible_node)?).await?;
             
-            // Forward request through the network layer
-            self.forward_request(responsible_node, message).await
+            client.put(PutRequest {
+                key: key.0,
+                value: value.0,
+                requesting_node: Some(NodeInfo {
+                    node_id: self.state.node_id.to_bytes(),
+                    address: self.state.address.clone(),
+                }),
+            }).await?;
+            
+            Ok(())
         }
     }
 
@@ -234,27 +236,32 @@ impl ChordActor {
             // We are responsible for this key
             Ok(self.state.storage.get(key).cloned())
         } else {
-            // Forward the request to the responsible node
-            let message = Message {
-                nonce: generate_nonce(),
-                payload: Some(Payload::LookupRequest(LookupRequest {
-                    key: key.0.clone(),
-                    requesting_node: self.state.node_id.to_bytes().to_vec(),
-                    ..Default::default()
-                })),
-            };
+            // Forward the request to the responsible node using gRPC
+            let mut client = ChordGrpcClient::new(self.get_node_address(responsible_node)?).await?;
             
-            // Forward request through the network layer
-            self.forward_request(responsible_node, message).await
+            let response = client.get(GetRequest {
+                key: key.0.clone(),
+                requesting_node: Some(NodeInfo {
+                    node_id: self.state.node_id.to_bytes(),
+                    address: self.state.address.clone(),
+                }),
+            }).await?;
+            
+            if response.success {
+                Ok(Some(Value(response.value)))
+            } else {
+                Ok(None)
+            }
         }
     }
 
-    // Helper method to forward requests
-    async fn forward_request(&self, target: NodeId, message: Message) -> Result<(), ChordError> {
-        // Implementation to forward the request through the network layer
-        // This would typically involve sending the message through libp2p
-        // and waiting for a response
-        todo!("Implement request forwarding")
+    // Helper method to get gRPC address for a node
+    fn get_node_address(&self, node_id: NodeId) -> Result<String, ChordError> {
+        // This would typically look up the address in a mapping maintained by the node
+        // For now, we'll assume we have this information in state
+        self.state.node_addresses.get(&node_id)
+            .cloned()
+            .ok_or_else(|| ChordError::NodeNotFound(format!("No address found for node {}", node_id)))
     }
 
     // When a node joins or leaves, transfer keys
@@ -274,30 +281,33 @@ impl ChordActor {
             self.state.storage.remove(key);
         }
         
-        // Send keys to the new responsible node
+        // Send keys to the new responsible node 
         if !keys_to_transfer.is_empty() {
-            let message = Message {
-                nonce: generate_nonce(),
-                payload: Some(Payload::ReplicateRequest(ReplicateRequest {
-                    data: keys_to_transfer.into_iter()
-                        .map(|(k, v)| KeyValue {
-                            key: k.0,
-                            value: v.0,
-                        })
-                        .collect(),
-                    replication_factor: 1,
-                    ..Default::default()
-                })),
-            };
+            let mut client = ChordGrpcClient::new(self.get_node_address(to)?).await?;
             
-            self.forward_request(to, message).await?;
+            // Convert keys to KeyValue proto messages
+            let kv_data: Vec<KeyValue> = keys_to_transfer.into_iter()
+                .map(|(k, v)| KeyValue {
+                    key: k.0,
+                    value: v.0,
+                })
+                .collect();
+
+            // Send ReplicateRequest via gRPC
+            client.replicate(ReplicateRequest {
+                data: kv_data,
+                requesting_node: Some(NodeInfo {
+                    node_id: self.state.node_id.to_bytes(),
+                    address: self.state.address.clone(),
+                }),
+            }).await?;
         }
         
         Ok(())
     }
 }
 
-// Actor handle for interacting with the ChordActor
+/// Actor handle for interacting with the ChordActor
 #[derive(Clone)]
 pub struct ChordHandle {
     sender: mpsc::Sender<ChordMessage>,
