@@ -1,8 +1,19 @@
-use crate::chord::{types::NodeId, CHORD_PROTOCOL};
+use crate::chord::types::NodeId;
+use crate::chord::CHORD_PROTOCOL;
 use libp2p::{
-    core::connection::ConnectionId,
-    swarm::{NetworkBehaviour, NotifyHandler, OneShotHandler, PollParameters, ToSwarm},
+    swarm::{
+        NetworkBehaviour,
+        ConnectionHandler,
+        ConnectionId,
+        FromSwarm,
+        ToSwarm,
+        THandler,
+        THandlerInEvent,
+        THandlerOutEvent,
+        NetworkBehaviourAction,
+    },
     PeerId,
+    Multiaddr,
 };
 use std::collections::HashMap;
 use std::task::{Context, Poll};
@@ -67,10 +78,8 @@ impl ChordRoutingBehaviour {
     }
 
     pub fn find_closest_preceding_node(&self, id: &NodeId) -> Option<PeerId> {
-        // Implement Chord's finger table lookup logic
         for i in (0..8).rev() {
             if let Some(peer) = self.finger_table.get(&i) {
-                // Check if this finger precedes the target id
                 if self.is_between(peer, &self.local_node_id(), id) {
                     return Some(*peer);
                 }
@@ -80,60 +89,103 @@ impl ChordRoutingBehaviour {
     }
 
     fn is_between(&self, peer: &PeerId, start: &NodeId, end: &NodeId) -> bool {
-        // Implement Chord's "between" check
-        // This is a simplified version - you'll need to implement proper ID space arithmetic
         let peer_id = NodeId::from(peer.to_bytes());
         peer_id > *start && peer_id <= *end
+    }
+
+    fn local_node_id(&self) -> NodeId {
+        // Implementation needed
+        unimplemented!()
+    }
+
+    pub fn handle_peer_expired(&mut self, peer_id: &PeerId) {
+        // Implementation needed
+        unimplemented!()
     }
 }
 
 impl NetworkBehaviour for ChordRoutingBehaviour {
-    type ConnectionHandler = OneShotHandler<ChordRoutingAction>;
-    type OutEvent = ChordRoutingEvent;
+    type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
+    type ToSwarm = ChordRoutingEvent;
 
-    fn new_handler(&mut self) -> Self::ConnectionHandler {
-        OneShotHandler::default()
-    }
-
-    fn addresses_of_peer(&mut self, _peer_id: &PeerId) -> Vec<libp2p::Multiaddr> {
-        Vec::new()
-    }
-
-    fn inject_connection_established(
+    fn handle_established_connection(
         &mut self,
-        peer_id: &PeerId,
-        connection: &ConnectionId,
-        _: &libp2p::core::ConnectedPoint,
+        peer_id: PeerId,
+        conn: ConnectionId,
+        role_override: Option<libp2p::core::Endpoint>,
         _: Option<&Vec<u8>>,
-        _: &libp2p::core::connection::EstablishedConnection,
     ) {
+        // Add protocol identifier to connection metadata
+        let protocol_version = CHORD_PROTOCOL.to_vec();
         self.connected_peers
-            .entry(*peer_id)
+            .entry(peer_id)
             .or_default()
-            .push(*connection);
+            .push(conn);
     }
 
-    fn inject_connection_closed(
+    fn handle_pending_outbound_connection(
         &mut self,
-        peer_id: &PeerId,
-        connection: &ConnectionId,
-        _: &libp2p::core::ConnectedPoint,
-        _: libp2p::core::connection::ClosedConnection,
+        _connection_id: ConnectionId,
+        _maybe_peer: Option<PeerId>,
+        _addresses: &[Multiaddr],
+        _effective_role: libp2p::core::Endpoint,
+    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
+        Ok(Vec::new())
+    }
+
+    fn handle_pending_inbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        _local_addr: &Multiaddr,
+        _remote_addr: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        Ok(())
+    }
+
+    fn handle_connection_closed(
+        &mut self,
+        peer_id: PeerId,
+        conn: ConnectionId,
+        _: libp2p::core::Endpoint,
+        _: Option<&Vec<u8>>,
     ) {
-        if let Some(connections) = self.connected_peers.get_mut(peer_id) {
-            connections.retain(|c| c != connection);
+        if let Some(connections) = self.connected_peers.get_mut(&peer_id) {
+            connections.retain(|c| c != &conn);
             if connections.is_empty() {
-                self.connected_peers.remove(peer_id);
+                self.connected_peers.remove(&peer_id);
             }
         }
     }
 
     fn poll(
         &mut self,
-        cx: &mut Context<'_>,
-        _: &mut impl PollParameters,
-    ) -> Poll<ToSwarm<Self::OutEvent, ChordRoutingAction>> {
-        // Handle pending requests and generate events
+        _: &mut Context<'_>,
+    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
         Poll::Pending
     }
+
+    fn handle_established_inbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        peer: PeerId,
+        _local_addr: &Multiaddr,
+        _remote_addr: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        Ok(())
+    }
+
+    fn handle_established_outbound_connection(
+        &mut self,
+        _connection_id: ConnectionId,
+        peer: PeerId,
+        _addr: &Multiaddr,
+    ) -> Result<(), ConnectionDenied> {
+        Ok(())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ConnectionDenied {
+    #[error("Connection denied: {0}")]
+    Custom(String),
 } 

@@ -1,10 +1,15 @@
 use tonic::transport::Channel;
-use crate::network::messages::{
-    chord::{LookupRequest, LookupResponse, NodeInfo}, 
-    message::{ReplicateRequest, ReplicateResponse}
+use crate::network::messages::chord::{
+    self,
+    LookupRequest, LookupResponse, NodeInfo,
+    PutRequest, PutResponse,
+    GetRequest, GetResponse,
+    ReplicateRequest, ReplicateResponse,
+    KeyValue,
 };
 use crate::chord::client::ChordNodeClient;
 use crate::error::NetworkError;
+use crate::chord::types::{Key, Value};
 
 pub struct ChordGrpcClient {
     client: ChordNodeClient<Channel>,
@@ -28,6 +33,34 @@ impl ChordGrpcClient {
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?;
 
         Ok(response.into_inner().responsible_node.unwrap())
+    }
+
+    pub async fn put(&mut self, request: PutRequest) -> Result<(), NetworkError> {
+        let response = self.client
+            .put(request)
+            .await
+            .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?
+            .into_inner();
+
+        if response.success {
+            Ok(())
+        } else {
+            Err(NetworkError::PeerUnreachable(response.error))
+        }
+    }
+
+    pub async fn get(&mut self, request: GetRequest) -> Result<Option<Value>, NetworkError> {
+        let response = self.client
+            .get(request)
+            .await
+            .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?
+            .into_inner();
+
+        if response.success {
+            Ok(Some(Value(response.value)))
+        } else {
+            Ok(None)
+        }
     }
 
     pub async fn replicate(&mut self, request: ReplicateRequest) -> Result<(), NetworkError> {

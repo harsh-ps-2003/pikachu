@@ -26,11 +26,11 @@ pub enum NetworkError {
 
 #[derive(Error, Debug)]
 pub enum ChordError {
-    #[error("Node not found in the ring")]
-    NodeNotFound,
+    #[error("Node not found: {0}")]
+    NodeNotFound(String),
     
-    #[error("Node already exists in the ring")]
-    NodeExists,
+    #[error("Node already exists: {0}")]
+    NodeExists(String),
     
     #[error("Invalid node ID: {0}")]
     InvalidNodeId(String),

@@ -1,9 +1,11 @@
 use tokio::sync::{mpsc, oneshot};
 use crate::{error::ChordError, chord::types::{NodeId, Key, Value, ChordState}, chord::{FINGER_TABLE_SIZE, SUCCESSOR_LIST_SIZE}};
-use crate::network::messages::chord::PutRequest;
+use crate::network::messages::chord::{GetRequest, PutRequest, NodeInfo, KeyValue};
+use crate::network::messages::message::ReplicateRequest;
 use crate::network::grpc::client::ChordGrpcClient;
 use std::collections::HashMap;
 use log::{debug, info, warn};
+use libp2p::multiaddr::{Protocol, Multiaddr};
 
 // Actor Messages
 #[derive(Debug)]
@@ -36,15 +38,33 @@ pub enum ChordMessage {
     GetPredecessor {
         respond_to: oneshot::Sender<Result<Option<NodeId>, ChordError>>,
     },
-    Notify {
+    
+    // Internal maintenance
+    Stabilize {
+        respond_to: oneshot::Sender<Result<(), ChordError>>,
+    },
+    FixFingers,
+    CheckPredecessor,
+    UpdateSuccessor {
         node: NodeId,
         respond_to: oneshot::Sender<Result<(), ChordError>>,
     },
-    
-    // Internal maintenance
-    Stabilize,
-    FixFingers,
-    CheckPredecessor,
+    GetNodeAddress {
+        node: NodeId,
+        respond_to: oneshot::Sender<Result<String, ChordError>>,
+    },
+    NodeLeft {
+        node: NodeId,
+        respond_to: oneshot::Sender<Result<(), ChordError>>,
+    },
+    DiscoveredPeer {
+        node_id: NodeId,
+        respond_to: oneshot::Sender<Result<(), ChordError>>,
+    },
+    PeerExpired {
+        node_id: NodeId,
+        respond_to: oneshot::Sender<Result<(), ChordError>>,
+    },
 }
 
 /// Responsible for handling messages related to the Chord protocol
@@ -54,16 +74,9 @@ pub struct ChordActor {
 }
 
 impl ChordActor {
-    pub fn new(node_id: NodeId, receiver: mpsc::Receiver<ChordMessage>) -> Self {
+    pub fn new(node_id: NodeId, addr: Multiaddr, receiver: mpsc::Receiver<ChordMessage>) -> Self {
         Self {
-            state: ChordState {
-                node_id,
-                predecessor: None,
-                successor: None,
-                successor_list: Vec::with_capacity(SUCCESSOR_LIST_SIZE),
-                finger_table: vec![None; FINGER_TABLE_SIZE],
-                storage: HashMap::new(),
-            },
+            state: ChordState::new(node_id, addr),
             receiver,
         }
     }
@@ -94,19 +107,24 @@ impl ChordActor {
     async fn handle_message(&mut self, msg: ChordMessage) {
         match msg {
             ChordMessage::Join { bootstrap_node, respond_to } => {
-                let result = self.join(bootstrap_node).await;
-                let _ = respond_to.send(result);
+                if let Some(bootstrap_addr) = self.state.get_node_address(&bootstrap_node) {
+                    let result = self.join(bootstrap_node, bootstrap_addr).await;
+                    let _ = respond_to.send(result);
+                } else {
+                    let _ = respond_to.send(Err(ChordError::NodeNotFound(
+                        format!("Bootstrap node {} not found", bootstrap_node)
+                    )));
+                }
             }
             ChordMessage::FindSuccessor { id, respond_to } => {
-                let result = self.find_successor(id).await;
+                let result = self.find_successor(id).await
+                    .map_err(|_| ChordError::NodeNotFound(
+                        format!("Could not find successor for id {}", id)
+                    ));
                 let _ = respond_to.send(result);
             }
             ChordMessage::GetPredecessor { respond_to } => {
                 let _ = respond_to.send(Ok(self.state.predecessor));
-            }
-            ChordMessage::Notify { node, respond_to } => {
-                let result = self.notify(node).await;
-                let _ = respond_to.send(result);
             }
             ChordMessage::Put { key, value, respond_to } => {
                 let result = self.put(key, value).await;
@@ -116,8 +134,9 @@ impl ChordActor {
                 let result = self.get(&key).await;
                 let _ = respond_to.send(result);
             }
-            ChordMessage::Stabilize => {
-                self.stabilize().await;
+            ChordMessage::Stabilize { respond_to } => {
+                let result = self.stabilize().await;
+                let _ = respond_to.send(result);
             }
             ChordMessage::FixFingers => {
                 self.fix_fingers().await;
@@ -125,13 +144,46 @@ impl ChordActor {
             ChordMessage::CheckPredecessor => {
                 self.check_predecessor().await;
             }
+            ChordMessage::UpdateSuccessor { node, respond_to } => {
+                let result = self.update_successor(node).await;
+                let _ = respond_to.send(result);
+            }
+            ChordMessage::GetNodeAddress { node, respond_to } => {
+                let result = self.state.get_node_address(&node)
+                    .map(|addr| self.state.multiaddr_to_string(addr))
+                    .ok_or_else(|| ChordError::NodeNotFound(
+                        format!("No address found for node {}", node)
+                    ));
+                let _ = respond_to.send(result);
+            }
+            ChordMessage::NodeLeft { node, respond_to } => {
+                debug!("Node {} left the network", node);
+                self.handle_node_departure(node).await;
+                let _ = respond_to.send(Ok(()));
+            }
+            ChordMessage::DiscoveredPeer { node_id, respond_to } => {
+                if self.should_track_node(&node_id) {
+                    self.state.add_known_node(node_id);
+                }
+                let _ = respond_to.send(Ok(()));
+            }
+            ChordMessage::PeerExpired { node_id, respond_to } => {
+                self.handle_node_departure(node_id).await;
+                let _ = respond_to.send(Ok(()));
+            }
             _ => {}
         }
     }
 
     // Core Chord Protocol Implementation
 
-    async fn join(&mut self, bootstrap_node: NodeId) -> Result<(), ChordError> {
+    async fn join(&mut self, bootstrap_node: NodeId, bootstrap_addr: String) -> Result<(), ChordError> {
+        if self.state.successor_list[0] {
+            return Err(ChordError::NodeExists(
+                format!("Node {} is already part of the ring", self.state.node_id)
+            ));
+        }
+        
         info!("Node {} joining through {}", self.state.node_id, bootstrap_node);
         self.state.predecessor = None;
         // Find successor through bootstrap node
@@ -139,6 +191,7 @@ impl ChordActor {
         Ok(())
     }
 
+    /// Finding the immediate responsible node for a key
     async fn find_successor(&self, id: NodeId) -> Result<NodeId, ChordError> {
         if let Some(successor) = self.state.successor {
             if self.is_between(&id, &self.state.node_id, &successor) {
@@ -146,8 +199,13 @@ impl ChordActor {
             }
         }
         
+        // // Otherwise, forward to closest preceding node
         let n0 = self.closest_preceding_node(id);
-        // Forward the request to n0
+        if n0 == self.state.node_id {
+            return Err(ChordError::NodeNotFound(
+                format!("No suitable successor found for id {}", id)
+            ));
+        }
         Ok(n0)
     }
 
@@ -170,18 +228,39 @@ impl ChordActor {
         Ok(())
     }
 
-    async fn stabilize(&mut self) {
-        debug!("Running stabilization for node {}", self.state.node_id);
-        if let Some(successor) = self.state.successor {
-            // Get successor's predecessor
-            // Update successor if needed
-            // Notify successor
+    async fn stabilize(&mut self) -> Result<(), ChordError> {
+        if let Some(successor) = self.state.successor() {
+            if let Some(successor_addr) = self.state.get_node_address(&successor) {
+                let grpc_addr = self.state.multiaddr_to_string(successor_addr);
+                match ChordGrpcClient::new(&grpc_addr).await {
+                    Ok(_) => {
+                        // Successor is alive, proceed with stabilization
+                        // ... existing stabilization logic ...
+                    }
+                    Err(_) => {
+                        // Successor is dead, remove it and use next successor
+                        self.handle_node_departure(successor).await;
+                    }
+                }
+            }
         }
+        Ok(())
     }
 
-    async fn fix_fingers(&mut self) {
-        debug!("Fixing finger table for node {}", self.state.node_id);
-        // Update finger table entries
+    /// Calculate the start of the kth finger interval
+    /// k is 0-based in our implementation, but 1-based in the paper
+    fn calculate_finger_id(&self, k: u8) -> NodeId {
+        self.state.node_id.add_power_of_two(k)
+    }
+
+    async fn fix_fingers(&mut self) -> Result<(), ChordError> {
+        for i in 0..FINGER_TABLE_SIZE {
+            let finger_id = self.calculate_finger_id(i as u8);
+            if let Ok(successor) = self.find_successor(finger_id).await {
+                self.state.finger_table[i] = Some(successor);
+            }
+        }
+        Ok(())
     }
 
     async fn check_predecessor(&mut self) {
@@ -210,13 +289,13 @@ impl ChordActor {
             Ok(())
         } else {
             // Forward the request to the responsible node using gRPC
-            let mut client = ChordGrpcClient::new(self.get_node_address(responsible_node)?).await?;
+            let mut client = self.create_grpc_client(responsible_node)?;
             
             client.put(PutRequest {
                 key: key.0,
                 value: value.0,
                 requesting_node: Some(NodeInfo {
-                    node_id: self.state.node_id.to_bytes(),
+                    node_id: self.state.node_id.to_bytes().to_vec(),
                     address: self.state.address.clone(),
                 }),
             }).await?;
@@ -237,12 +316,12 @@ impl ChordActor {
             Ok(self.state.storage.get(key).cloned())
         } else {
             // Forward the request to the responsible node using gRPC
-            let mut client = ChordGrpcClient::new(self.get_node_address(responsible_node)?).await?;
+            let mut client = self.create_grpc_client(responsible_node)?;
             
             let response = client.get(GetRequest {
                 key: key.0.clone(),
                 requesting_node: Some(NodeInfo {
-                    node_id: self.state.node_id.to_bytes(),
+                    node_id: self.state.node_id.to_bytes().to_vec(),
                     address: self.state.address.clone(),
                 }),
             }).await?;
@@ -283,7 +362,7 @@ impl ChordActor {
         
         // Send keys to the new responsible node 
         if !keys_to_transfer.is_empty() {
-            let mut client = ChordGrpcClient::new(self.get_node_address(to)?).await?;
+            let mut client = self.create_grpc_client(to)?;
             
             // Convert keys to KeyValue proto messages
             let kv_data: Vec<KeyValue> = keys_to_transfer.into_iter()
@@ -305,6 +384,93 @@ impl ChordActor {
         
         Ok(())
     }
+
+    async fn update_successor(&self, node: NodeId) -> Result<(), ChordError> {
+        // if the immediate successor leaves, after stabalization of network, the successor should be automatically updated
+        // Implementation needed
+        Ok(())
+    }
+
+    async fn handle_node_departure(&mut self, node: NodeId) {
+        // Complete cleanup - this node is gone forever
+        self.state.remove_node_address(&node);
+
+        if self.state.successor_list[0] == Some(node) {
+            // Need to find new successor
+            if let Some(next_successor) = self.state.successor_list.first().cloned() {
+                self.state.successor[0] = Some(next_successor);
+            } else {
+                self.state.successor = None;
+            }
+        }
+
+        if self.state.predecessor == Some(node) {
+            // Will be fixed by next stabilization
+            self.state.predecessor = None;
+        }
+
+        // Clean finger table
+        for finger in self.state.finger_table.iter_mut() {
+            if *finger == Some(node) {
+                *finger = None;
+            }
+        }
+
+        // Remove from successor list
+        self.state.successor_list.retain(|&x| x != node);
+    }
+
+    // When creating gRPC client, extract host and port from multiaddr
+    async fn create_grpc_client(&self, node: NodeId) -> Result<ChordGrpcClient, ChordError> {
+        let addr = self.state.get_multiaddr(&node)
+            .ok_or_else(|| ChordError::NodeNotFound(format!("No address for node {}", node)))?;
+            
+        let grpc_addr = ChordState::to_grpc_addr(addr)?;
+        
+        ChordGrpcClient::new(&grpc_addr).await
+            .map_err(|e| ChordError::InvalidRequest(format!("Failed to create gRPC client: {}", e)))
+    }
+
+    fn should_track_node(&self, node_id: &NodeId) -> bool {
+        // Implement Chord-specific logic for determining if we should
+        // track this node (e.g., based on ID distance, ring position, etc.)
+        true
+    }
+
+    /// Updates the successor list during stabilization
+    async fn update_successor_list(&mut self) -> Result<(), ChordError> {
+        let mut new_list = Vec::with_capacity(SUCCESSOR_LIST_SIZE);
+        
+        // Start with our immediate successor
+        if let Some(mut current) = self.state.successor() {
+            new_list.push(current);
+            
+            // Get successors of our successor until list is full
+            while new_list.len() < SUCCESSOR_LIST_SIZE {
+                match self.get_successor_list(current).await {
+                    Ok(next_successors) => {
+                        for succ in next_successors {
+                            if !new_list.contains(&succ) {
+                                new_list.push(succ);
+                                if new_list.len() >= SUCCESSOR_LIST_SIZE {
+                                    break;
+                                }
+                            }
+                        }
+                        if let Some(next) = next_successors.first() {
+                            current = *next;
+                        } else {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        }
+        
+        self.state.successor_list = new_list;
+        Ok(())
+    }
 }
 
 /// Actor handle for interacting with the ChordActor
@@ -314,9 +480,9 @@ pub struct ChordHandle {
 }
 
 impl ChordHandle {
-    pub fn new(node_id: NodeId) -> (Self, ChordActor) {
+    pub fn new(node_id: NodeId, grpc_port: u16, grpc_addr: String) -> (Self, ChordActor) {
         let (sender, receiver) = mpsc::channel(32);
-        let actor = ChordActor::new(node_id, receiver);
+        let actor = ChordActor::new(node_id, grpc_addr.parse().unwrap(), receiver);
         (Self { sender }, actor)
     }
 
@@ -337,6 +503,29 @@ impl ChordHandle {
         self.sender
             .send(ChordMessage::FindSuccessor {
                 id,
+                respond_to: send,
+            })
+            .await
+            .map_err(|_| ChordError::InvalidRequest("Actor is dead".into()))?;
+        recv.await.map_err(|_| ChordError::InvalidRequest("Actor died during request".into()))?
+    }
+
+    pub async fn stabilize(&self) -> Result<(), ChordError> {
+        let (send, recv) = oneshot::channel();
+        self.sender
+            .send(ChordMessage::Stabilize {
+                respond_to: send,
+            })
+            .await
+            .map_err(|_| ChordError::InvalidRequest("Actor is dead".into()))?;
+        recv.await.map_err(|_| ChordError::InvalidRequest("Actor died during request".into()))?
+    }
+
+    pub async fn update_successor(&self, node: NodeId) -> Result<(), ChordError> {
+        let (send, recv) = oneshot::channel();
+        self.sender
+            .send(ChordMessage::UpdateSuccessor {
+                node,
                 respond_to: send,
             })
             .await

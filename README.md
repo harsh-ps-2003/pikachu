@@ -59,6 +59,23 @@ Client Side: See ChordGrpcClient (not shown in this snippet, but existing in src
 This bidirectional setup using gRPC ensures that our nodes can seamlessly discover each other and handle distributed operations, all while benefiting from gRPC's robust communication framework and the structured routing of a Chord DHT.
 Feel free to ask for further clarification or additional details on any part of this architecture!
 
+The key changes made:
+Added protocol version checking in connection establishment
+Integrated CHORD_PROTOCOL into the swarm configuration
+Added protocol verification when establishing connections
+Used protocol identifier in routing behavior
+This ensures that:
+Only nodes speaking the Chord protocol can connect
+Protocol versioning is properly handled
+Connections are properly tagged with the protocol identifier
+The network layer can distinguish Chord traffic from other protocols
+The protocol identifier helps in:
+Protocol negotiation during connection establishment
+Versioning of the Chord protocol
+Isolation from other protocols running on the same network
+Future protocol upgrades and compatibility checks
+This implementation provides a clean separation between different protocols while ensuring that Chord nodes can properly identify and communicate with each other.
+
 ### Demo
 
 `pikachu init` can be used to start the nodes! Use the command to start the bootstrap node. Open another terminal instance and then use the same command to add as many nodes as you want. If you close the terminal instance, the nodes will leave the system.
@@ -71,7 +88,6 @@ This is a very close implementation of the infamous Chord DHT with some twists :
 
 * It's BFT now :)
 * Traditional Chord doesn't specify any encryption, leaving communication vulnerable to man-in-the-middle attacks or data tampering. Noise Protocol Framework has been used to tackle this which automatically handles peer authentication, reducing the risk of Sybil attacks
-* Instead of TCP/UDP, gRPC has been used
 * [mDNS](https://datatracker.ietf.org/doc/html/rfc6762) has been used for local peer discovery
 
 ### Reference

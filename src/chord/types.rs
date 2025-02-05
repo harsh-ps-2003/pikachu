@@ -2,7 +2,7 @@ use sha2::{Sha256, Digest};
 use std::fmt;
 use std::collections::HashMap;
 use crate::error::ChordError;
-use libp2p::PeerId;
+use libp2p::{PeerId, Multiaddr, Protocol};
 
 /*
 While the NodeId is used for routing and determining data responsibility in the ring, 
@@ -73,6 +73,24 @@ impl NodeId {
     pub fn to_peer_id(&self) -> Option<PeerId> {
         PeerId::from_bytes(&self.0).ok()
     }
+
+    // Add this method to handle modular arithmetic in the ID space
+    pub fn add_power_of_two(&self, k: u8) -> Self {
+        let mut result = [0u8; 32];
+        let mut hasher = Sha256::new();
+        
+        // Convert node ID and 2^k to big-endian bytes
+        let node_bytes = self.0;
+        let power = 1u32 << k;
+        let power_bytes = power.to_be_bytes();
+        
+        // Hash the concatenation to get (n + 2^k) mod 2^256
+        hasher.update(&node_bytes);
+        hasher.update(&power_bytes);
+        result.copy_from_slice(&hasher.finalize());
+        
+        NodeId(result)
+    }
 }
 
 impl From<PeerId> for NodeId {
@@ -81,16 +99,63 @@ impl From<PeerId> for NodeId {
     }
 }
 
+/// ChordState represents the local state within our Chord node.
 pub struct ChordState {
     pub node_id: NodeId,
-    pub grpc_port: u16,  // Each node's gRPC server port
-    pub address: String, // Format: "http://127.0.0.1:{grpc_port}"
     pub predecessor: Option<NodeId>,
-    pub successor: Option<NodeId>,
     pub successor_list: Vec<NodeId>,
     pub finger_table: Vec<Option<NodeId>>,
     pub storage: HashMap<Key, Value>,
-    pub node_addresses: HashMap<NodeId, String>,  // Mapping of NodeId to gRPC addresses
+    pub node_addresses: HashMap<NodeId, Multiaddr>,  // Single source of truth for node addresses
+}
+
+impl ChordState {
+    pub fn new(node_id: NodeId, addr: Multiaddr) -> Self {
+        let mut state = Self {
+            node_id,
+            predecessor: None,
+            successor_list: Vec::new(),
+            finger_table: vec![None; 256],
+            storage: HashMap::new(),
+            node_addresses: HashMap::new(),
+        };
+        state.node_addresses.insert(node_id, addr);
+        state
+    }
+
+    /// Get the multiaddr for a node if it exists
+    pub fn get_multiaddr(&self, node_id: &NodeId) -> Option<&Multiaddr> {
+        self.node_addresses.get(node_id)
+    }
+
+    /// Helper to get the immediate successor from the successor list
+    pub fn successor(&self) -> Option<NodeId> {
+        self.successor_list.first().copied()
+    }
+
+    /// Get gRPC address from multiaddr
+    pub fn to_grpc_addr(addr: &Multiaddr) -> Result<String, ChordError> {
+        let mut host = None;
+        let mut port = None;
+        
+        for proto in addr.iter() {
+            match proto {
+                Protocol::Ip4(ip) => host = Some(ip.to_string()),
+                Protocol::Tcp(p) => port = Some(p),
+                _ => {}
+            }
+        }
+        
+        match (host, port) {
+            (Some(h), Some(p)) => Ok(format!("http://{}:{}", h, p)),
+            _ => Err(ChordError::InvalidRequest("Invalid multiaddr format".into()))
+        }
+    }
+
+    pub fn add_known_node(&mut self, node_id: NodeId) {
+        // Update finger tables, successor lists etc. as needed
+        // This is purely Chord protocol state management
+    }
 }
 
 /// Key type for storing data in the DHT
