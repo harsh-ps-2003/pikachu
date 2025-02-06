@@ -134,21 +134,24 @@ impl ChordState {
     }
 
     /// Get gRPC address from multiaddr
-    pub fn to_grpc_addr(addr: &Multiaddr) -> Result<String, ChordError> {
-        let mut host = None;
+    pub fn to_grpc_addr(addr: Multiaddr) -> Result<String, ChordError> {
+        let mut host = String::new();
         let mut port = None;
-        
-        for proto in addr.iter() {
-            match proto {
-                Protocol::Ip4(ip) => host = Some(ip.to_string()),
+
+        // Extract host and port from Multiaddr
+        for protocol in addr.iter() {
+            match protocol {
+                Protocol::Ip4(ip) => host = ip.to_string(),
+                Protocol::Ip6(ip) => host = format!("[{}]", ip),
                 Protocol::Tcp(p) => port = Some(p),
-                _ => {}
+                _ => continue,
             }
         }
-        
-        match (host, port) {
-            (Some(h), Some(p)) => Ok(format!("http://{}:{}", h, p)),
-            _ => Err(ChordError::InvalidRequest("Invalid multiaddr format".into()))
+
+        if let Some(port) = port {
+            Ok(format!("{}:{}", host, port))
+        } else {
+            Err(ChordError::InvalidRequest("Missing port in address".into()))
         }
     }
 

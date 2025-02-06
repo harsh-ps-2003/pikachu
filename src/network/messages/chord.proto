@@ -17,6 +17,9 @@ service ChordNode {
     
     // Health check
     rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
+    
+    // Data replication
+    rpc Replicate (ReplicateRequest) returns (ReplicateResponse);
 }
 
 message NodeInfo {
@@ -126,4 +129,15 @@ message HeartbeatResponse {
 message KeyValue {
     bytes key = 1;
     bytes value = 2;
+}
+
+// Replication Messages
+message ReplicateRequest {
+    repeated KeyValue data = 1;
+    NodeInfo source_node = 2;
+}
+
+message ReplicateResponse {
+    bool success = 1;
+    string error = 2;
 }

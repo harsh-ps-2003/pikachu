@@ -1,13 +1,18 @@
 use tonic::transport::Channel;
-use crate::network::messages::chord::{
-    self,
-    LookupRequest, LookupResponse, NodeInfo,
+use crate::network::messages::{
+    chord_node_client::ChordNodeClient,
+    JoinRequest, JoinResponse,
+    LookupRequest, LookupResponse,
     PutRequest, PutResponse,
     GetRequest, GetResponse,
+    NotifyRequest, NotifyResponse,
+    StabilizeRequest, StabilizeResponse,
+    FindSuccessorRequest, FindSuccessorResponse,
+    GetPredecessorRequest, GetPredecessorResponse,
+    HeartbeatRequest, HeartbeatResponse,
     ReplicateRequest, ReplicateResponse,
-    KeyValue,
+    NodeInfo, KeyValue,
 };
-use crate::chord::client::ChordNodeClient;
 use crate::error::NetworkError;
 use crate::chord::types::{Key, Value};
 

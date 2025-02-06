@@ -6,7 +6,7 @@ authors = ["Harsh Pratap Singh <harshpratapsingh8210@gmail.com>"]
 
 [dependencies]
 tokio = { version = "1.36", features = ["full"] }
-tonic = "0.12.3"
+tonic = "0.12"
 clap = { version = "4.1", features = ["derive"] }
 libp2p = { version = "0.53", features = ["tcp", "dns", "async-std", "noise", "yamux"] }
 async-trait = "0.1.85"
@@ -19,14 +19,24 @@ bytes = "1.5"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 futures = "0.3"
-prost = { version = "0.12.6", features = ["prost-derive"] }
-prost-types = "0.13.1"
+prost = { version = "0.13", features = ["prost-derive"] }
+prost-types = "0.13"
 thiserror = "2.0.11"
 hex = "0.4.3"
 
+[build]
+rustflags = ["-Clink-arg=-fuse-ld=mold"]
+
 [build-dependencies]
-prost-build = "0.13.1"
+tonic-build = "0.12"
 
 [profile.release]
 lto = true
 panic = "abort"
+
+[profile.ci]
+inherits = "release"
+debug = false       # Disable debug symbols
+lto = "off"         # Disable Link-Time Optimization (LTO)
+codegen-units = 16  # Increase parallelism
+incremental = false # Disable incremental compilation for clean builds

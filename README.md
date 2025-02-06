@@ -76,9 +76,17 @@ Isolation from other protocols running on the same network
 Future protocol upgrades and compatibility checks
 This implementation provides a clean separation between different protocols while ensuring that Chord nodes can properly identify and communicate with each other.
 
+External gRPC request → ChordGrpcServer
+ChordGrpcServer converts to internal types → ChordHandle
+ChordHandle processes request using actor
+If needed, actor uses ChordGrpcClient to make outgoing requests
+Response flows back through the chain
+
+In Chord, when a node joins the network, its successor node is responsible for transferring the relevant keys to the new node. Similarly, when a node leaves, its keys should be redistributed to the remaining nodes to prevent data loss. The replicate method in the gRPC service is likely part of this data transfer process.
+
 ### Demo
 
-`pikachu init` can be used to start the nodes! Use the command to start the bootstrap node. Open another terminal instance and then use the same command to add as many nodes as you want. If you close the terminal instance, the nodes will leave the system.
+`cargo run -- start` can be used to start the bootstrap node! Open another terminal instance and then use the command `cargo run -- start --bootstrap /ip4/127.0.0.1/tcp/<bootstrap-node-port>` to add as many nodes as you want to the network. If you close the terminal instance, the nodes will leave the system.
 
 Use `pikachu PUT <KEY> <VALUE>` to store key-value pair in the DHT, and `pikachu GET <KEY>` to retrieve the value.
 

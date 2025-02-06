@@ -53,16 +53,8 @@ pub enum ChordMessage {
         node: NodeId,
         respond_to: oneshot::Sender<Result<String, ChordError>>,
     },
-    NodeLeft {
+    NodeUnavailable {
         node: NodeId,
-        respond_to: oneshot::Sender<Result<(), ChordError>>,
-    },
-    DiscoveredPeer {
-        node_id: NodeId,
-        respond_to: oneshot::Sender<Result<(), ChordError>>,
-    },
-    PeerExpired {
-        node_id: NodeId,
         respond_to: oneshot::Sender<Result<(), ChordError>>,
     },
 }
@@ -107,7 +99,12 @@ impl ChordActor {
     async fn handle_message(&mut self, msg: ChordMessage) {
         match msg {
             ChordMessage::Join { bootstrap_node, respond_to } => {
-                if let Some(bootstrap_addr) = self.state.get_node_address(&bootstrap_node) {
+                if let Some(bootstrap_addr) = self.state.get_multiaddr(&bootstrap_node) {
+                    // Convert Multiaddr to gRPC address string
+                    let bootstrap_addr = ChordState::to_grpc_addr(&bootstrap_addr.clone())
+                        .map_err(|e| ChordError::InvalidRequest(format!("Invalid address: {}", e)))
+                        .unwrap_or_default();
+                    
                     let result = self.join(bootstrap_node, bootstrap_addr).await;
                     let _ = respond_to.send(result);
                 } else {
@@ -149,26 +146,18 @@ impl ChordActor {
                 let _ = respond_to.send(result);
             }
             ChordMessage::GetNodeAddress { node, respond_to } => {
-                let result = self.state.get_node_address(&node)
-                    .map(|addr| self.state.multiaddr_to_string(addr))
-                    .ok_or_else(|| ChordError::NodeNotFound(
-                        format!("No address found for node {}", node)
+                let result = self.state.get_multiaddr(&node)
+                    .map(|addr| ChordState::to_grpc_addr(addr.clone()))
+                    .transpose()
+                    .map_err(|e| ChordError::InvalidRequest(format!("Invalid address: {}", e)))
+                    .and_then(|maybe_addr| maybe_addr.ok_or_else(|| 
+                        ChordError::NodeNotFound(format!("No address found for node {}", node))
                     ));
                 let _ = respond_to.send(result);
             }
-            ChordMessage::NodeLeft { node, respond_to } => {
-                debug!("Node {} left the network", node);
+            ChordMessage::NodeUnavailable { node, respond_to } => {
+                debug!("Node {} is no longer available", node);
                 self.handle_node_departure(node).await;
-                let _ = respond_to.send(Ok(()));
-            }
-            ChordMessage::DiscoveredPeer { node_id, respond_to } => {
-                if self.should_track_node(&node_id) {
-                    self.state.add_known_node(node_id);
-                }
-                let _ = respond_to.send(Ok(()));
-            }
-            ChordMessage::PeerExpired { node_id, respond_to } => {
-                self.handle_node_departure(node_id).await;
                 let _ = respond_to.send(Ok(()));
             }
             _ => {}
@@ -230,8 +219,10 @@ impl ChordActor {
 
     async fn stabilize(&mut self) -> Result<(), ChordError> {
         if let Some(successor) = self.state.successor() {
-            if let Some(successor_addr) = self.state.get_node_address(&successor) {
-                let grpc_addr = self.state.multiaddr_to_string(successor_addr);
+            if let Some(successor_addr) = self.state.get_multiaddr(&successor) {
+                let grpc_addr = ChordState::to_grpc_addr(successor_addr.clone())
+                    .map_err(|e| ChordError::InvalidRequest(format!("Invalid address: {}", e)))
+                    .unwrap_or_default();
                 match ChordGrpcClient::new(&grpc_addr).await {
                     Ok(_) => {
                         // Successor is alive, proceed with stabilization
@@ -474,6 +465,7 @@ impl ChordActor {
 }
 
 /// Actor handle for interacting with the ChordActor
+/// The server handles gRPC requests and forwards them to the Chord actor via ChordHandle
 #[derive(Clone)]
 pub struct ChordHandle {
     sender: mpsc::Sender<ChordMessage>,
