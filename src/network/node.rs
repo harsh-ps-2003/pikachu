@@ -2,28 +2,29 @@ use crate::chord::actor::{ChordActor, ChordHandle, ChordMessage};
 use crate::error::*;
 use crate::network::grpc::PeerConfig;
 use libp2p::{
-    Swarm,
+    Swarm, SwarmBuilder,
+    Transport,
     futures::StreamExt,
     mdns::{self, Event as MdnsEvent},
     noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, Multiaddr,
     multiaddr::Protocol,
+    core::upgrade,
+    identity,
 };
-#[allow(unused_imports)]
 use libp2p::swarm::derive_prelude::*;
 use log::{debug, error, info, warn};
-use std::error::Error as StdError;
+use std::collections::HashMap;
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot};
-use tokio::{io, select, time::sleep};
+use tokio::{select, time::sleep};
 use crate::chord::{
     routing::{ChordRoutingBehaviour, ChordRoutingEvent}, 
-    types::NodeId
+    types::NodeId,
+    CHORD_PROTOCOL,
 };
 use crate::network::grpc::{client::ChordGrpcClient, server::ChordGrpcServer};
-use crate::chord::CHORD_PROTOCOL;
-use std::collections::HashMap;
 
 #[derive(NetworkBehaviour)]
 #[behaviour(out_event = "ComposedEvent")]
@@ -32,7 +33,6 @@ pub struct PeerBehaviour {
     mdns: mdns::tokio::Behaviour,
 }
 
-// Define the combined event type
 #[derive(Debug)]
 pub enum ComposedEvent {
     ChordRouting(ChordRoutingEvent),
@@ -54,34 +54,61 @@ impl From<MdnsEvent> for ComposedEvent {
 pub struct ChordPeer {
     chord_handle: ChordHandle,
     swarm: Swarm<PeerBehaviour>,
-    // Track discovered peers and their addresses
     discovered_peers: HashMap<NodeId, Multiaddr>,
 }
 
 impl ChordPeer {
     pub async fn new(config: PeerConfig) -> Result<Self, NetworkError> {
-        let mut swarm = create_swarm()?;
+        // Generate new key pair
+        let local_key = identity::Keypair::generate_ed25519();
+        let local_peer_id = PeerId::from(local_key.public());
+        let node_id = NodeId::from_peer_id(&local_peer_id);
 
-        // Listen on the configured port
-        let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", config.port)
+        // Create transport
+        let transport = Transport::new(
+            tcp::Config::default(),
+            noise::Config::new(&local_key)?,
+            yamux::Config::default(),
+        )?;
+
+        let mut swarm = SwarmBuilder::with_new_identity()
+            .with_tokio()
+            .with_tcp(
+                tcp::Config::default(),
+                noise::Config::new(&local_key)?,
+                yamux::Config::default(),
+            )?
+            .with_behaviour(|key| {
+                Ok(Behaviour {
+                    chord: ChordRoutingBehaviour::new(),
+                    mdns: mdns::tokio::Behaviour::new(
+                        mdns::Config::default(),
+                        key.public().to_peer_id(),
+                    )?,
+                })
+            })?
+            .build();
+
+        // Listen on all interfaces and whatever port the OS assigns
+        let port = config.grpc_port.unwrap_or_else(|| get_random_port());
+        let listen_addr = format!("/ip4/0.0.0.0/tcp/{}", port)
             .parse()
             .map_err(|e| NetworkError::ConfigError(e.to_string()))?;
+        
         swarm.listen_on(listen_addr)?;
-        
-        let peer_id = *swarm.local_peer_id();
-        let node_id = NodeId::from_peer_id(&peer_id);
-        
-        // Use the actual listening address from mDNS
-        let listen_addr = swarm.listeners().next()
-            .ok_or_else(|| NetworkError::ConfigError("No listening address".into()))?
-            .clone();
-        
-        let (chord_handle, chord_actor) = ChordHandle::new(node_id, listen_addr);
-        
+
+        // Create ChordHandle and actor
+        let (chord_handle, chord_actor) = ChordHandle::new(
+            node_id,
+            port,
+            format!("http://127.0.0.1:{}", port),
+        );
+
+        // Spawn actor
         tokio::spawn(async move {
             chord_actor.run().await;
         });
-        
+
         Ok(Self {
             chord_handle,
             swarm,
@@ -90,55 +117,60 @@ impl ChordPeer {
     }
 
     pub async fn run(&mut self) -> Result<(), NetworkError> {
+        let mut stabilize_interval = tokio::time::interval(Duration::from_secs(30));
         let mut cleanup_interval = tokio::time::interval(Duration::from_secs(60));
-        
+
         loop {
             select! {
-                _ = cleanup_interval.tick() => {
-                    self.cleanup_stale_addresses().await?;
-                }
-                event = self.swarm.next() => match event {
-                    Some(SwarmEvent::Behaviour(ComposedEvent::ChordRouting(event))) => {
-                        match event {
-                            ChordRoutingEvent::SuccessorUpdated(peer) => {
-                                info!("Successor updated: {}", peer);
-                                self.handle_successor_update(peer).await?;
-                            }
-                            ChordRoutingEvent::RouteFound(target, next_hop) => {
-                                debug!("Route found for {}: next hop {}", target, next_hop);
-                                self.forward_request(target, next_hop).await?;
-                            }
-                            _ => {}
-                        }
-                    }
-                    Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
-                        // Verify protocol version
-                        if let Some(protocols) = self.swarm.behaviour().supported_protocols(&peer_id) {
-                            if !protocols.contains(&CHORD_PROTOCOL.to_vec()) {
-                                warn!("Peer {} doesn't support Chord protocol", peer_id);
-                                self.swarm.disconnect(peer_id)?;
-                            }
-                        }
-                    }
-                    SwarmEvent::Behaviour(ComposedEvent::Mdns(MdnsEvent::Discovered(peers))) => {
+                swarm_event = self.swarm.next() => match swarm_event {
+                    Some(SwarmEvent::Behaviour(ComposedEvent::Mdns(MdnsEvent::Discovered(peers)))) => {
                         for (peer_id, addr) in peers {
                             info!("Discovered peer: {} at {}", peer_id, addr);
                             self.handle_discovered_peer(peer_id, addr).await?;
                         }
                     }
-                    SwarmEvent::Behaviour(ComposedEvent::Mdns(MdnsEvent::Expired(peers))) => {
+                    Some(SwarmEvent::Behaviour(ComposedEvent::Mdns(MdnsEvent::Expired(peers)))) => {
                         for (peer_id, _) in peers {
                             warn!("Peer expired: {}", peer_id);
-                            self.handle_peer_expired(&peer_id)?;
+                            self.handle_peer_expired(&peer_id).await?;
                         }
+                    }
+                    Some(SwarmEvent::Behaviour(ComposedEvent::ChordRouting(event))) => {
+                        self.handle_chord_event(event).await?;
+                    }
+                    Some(SwarmEvent::NewListenAddr { address, .. }) => {
+                        info!("Listening on {}", address);
+                    }
+                    Some(SwarmEvent::ConnectionEstablished { peer_id, .. }) => {
+                        debug!("Connected to {}", peer_id);
+                    }
+                    Some(SwarmEvent::ConnectionClosed { peer_id, .. }) => {
+                        debug!("Disconnected from {}", peer_id);
                     }
                     _ => {}
                 },
-                _ = sleep(Duration::from_secs(30)) => {
+                _ = stabilize_interval.tick() => {
                     self.stabilize_chord_network().await?;
+                }
+                _ = cleanup_interval.tick() => {
+                    self.cleanup_stale_addresses().await?;
                 }
             }
         }
+    }
+
+    async fn handle_chord_event(&mut self, event: ChordRoutingEvent) -> Result<(), NetworkError> {
+        match event {
+            ChordRoutingEvent::SuccessorUpdated(peer) => {
+                let node_id = NodeId::from_peer_id(&peer);
+                self.chord_handle.update_successor(node_id).await?;
+            }
+            ChordRoutingEvent::RouteFound(target, next_hop) => {
+                self.forward_request(target, next_hop).await?;
+            }
+            _ => {}
+        }
+        Ok(())
     }
 
     async fn stabilize_chord_network(&mut self) -> Result<(), NetworkError> {
@@ -154,23 +186,9 @@ impl ChordPeer {
         Ok(())
     }
 
-    async fn handle_successor_update(&mut self, peer: PeerId) -> Result<(), NetworkError> {
-        let node_id = NodeId::from_peer_id(&peer);
-        self.chord_handle.update_successor(node_id).await?;
-        Ok(())
-    }
-
-    async fn forward_request(&mut self, target: NodeId, next_hop: PeerId) -> Result<(), NetworkError> {
-        // Get the gRPC address for the next_hop
-        let addr = self.get_node_address(next_hop)?;
-        
-        // Create gRPC client
-        let mut client = ChordGrpcClient::new(addr).await?;
-        
-        // Forward the request - convert NodeId to Vec<u8>
-        client.lookup(target.to_bytes().to_vec()).await?;
-        
-        Ok(())
+    fn calculate_finger_id(&self, index: u8) -> NodeId {
+        // Implementation needed based on your Chord protocol
+        unimplemented!()
     }
 
     /// Get gRPC address for a node. Since we're using mDNS, we assume localhost
@@ -205,8 +223,20 @@ impl ChordPeer {
         // Update Chord routing
         self.swarm.behaviour_mut().chord_routing.handle_peer_discovered(peer_id);
         
-        // Notify Chord actor about the new peer
-        self.chord_handle.discovered_peer(node_id).await?;
+        // Notify Chord actor
+        let (send, recv) = oneshot::channel();
+        self.chord_handle
+            .sender
+            .send(ChordMessage::PeerDiscovered {
+                node_id,
+                respond_to: send,
+            })
+            .await
+            .map_err(|_| NetworkError::Internal("Failed to send peer discovered message".into()))?;
+
+        recv.await
+            .map_err(|_| NetworkError::Internal("Failed to receive response".into()))?
+            .map_err(|e| NetworkError::Internal(e.to_string()))?;
         
         Ok(())
     }
@@ -221,7 +251,19 @@ impl ChordPeer {
         self.swarm.behaviour_mut().chord_routing.handle_peer_expired(peer_id);
         
         // Notify Chord actor
-        self.chord_handle.peer_expired(node_id).await?;
+        let (send, recv) = oneshot::channel();
+        self.chord_handle
+            .sender
+            .send(ChordMessage::NodeUnavailable {
+                node: node_id,
+                respond_to: send,
+            })
+            .await
+            .map_err(|_| NetworkError::Internal("Failed to send node unavailable message".into()))?;
+
+        recv.await
+            .map_err(|_| NetworkError::Internal("Failed to receive response".into()))?
+            .map_err(|e| NetworkError::Internal(e.to_string()))?;
         
         Ok(())
     }
@@ -230,74 +272,47 @@ impl ChordPeer {
         let mut departed_nodes = Vec::new();
         
         // Check which nodes are no longer reachable
-        for (node_id, addr) in &self.state.node_addresses {
-            match ChordState::to_grpc_addr(addr)
-                .and_then(|addr| ChordGrpcClient::new(&addr).await
-                    .map_err(|e| ChordError::InvalidRequest(e.to_string()))) 
-            {
-                Ok(_) => {}, // Node is alive
-                Err(_) => departed_nodes.push(*node_id),
+        for (node_id, _) in &self.discovered_peers {
+            if let Ok(addr) = self.get_grpc_address(node_id) {
+                match ChordGrpcClient::new(&addr).await {
+                    Ok(_) => {}, // Node is alive
+                    Err(_) => departed_nodes.push(*node_id),
+                }
             }
         }
 
         // Handle each departed node
         for node_id in departed_nodes {
-            self.chord_handle.notify_node_left(node_id).await?;
+            let (send, recv) = oneshot::channel();
+            self.chord_handle
+                .sender
+                .send(ChordMessage::NodeUnavailable {
+                    node: node_id,
+                    respond_to: send,
+                })
+                .await
+                .map_err(|_| NetworkError::Internal("Failed to send node unavailable message".into()))?;
+
+            recv.await
+                .map_err(|_| NetworkError::Internal("Failed to receive response".into()))?
+                .map_err(|e| NetworkError::Internal(e.to_string()))?;
         }
 
         Ok(())
     }
 
-    async fn get_all_node_addresses(&mut self) -> Result<Vec<(NodeId, String)>, NetworkError> {
-        let (send, recv) = oneshot::channel();
-        self.chord_handle
-            .sender
-            .send(ChordMessage::GetAllNodeAddresses {
-                respond_to: send,
-            })
-            .await
-            .map_err(|_| NetworkError::Internal("Failed to send message".into()))?;
+    async fn forward_request(&mut self, target: NodeId, next_hop: PeerId) -> Result<(), NetworkError> {
+        // Get the gRPC address for the next_hop
+        let addr = self.get_grpc_address(&next_hop)?;
         
-        recv.await
-            .map_err(|_| NetworkError::Internal("Failed to receive response".into()))?
-            .map_err(|e| NetworkError::Internal(e.to_string()))
+        // Create gRPC client
+        let mut client = ChordGrpcClient::new(addr).await?;
+        
+        // Forward the request - convert NodeId to Vec<u8>
+        client.lookup(target.to_bytes().to_vec()).await?;
+        
+        Ok(())
     }
-}
-
-fn create_swarm() -> Result<Swarm<PeerBehaviour>, Box<dyn StdError>> {
-    let swarm = libp2p::SwarmBuilder::with_new_identity()
-        .with_tokio()
-        .with_tcp(
-            tcp::Config::default(),
-            noise::Config::new,
-            yamux::Config::default,
-        )?
-        .with_behaviour(|key| {
-            let chord_routing = ChordRoutingBehaviour::new();
-            let mdns = mdns::tokio::Behaviour::new(mdns::Config::default(), key.public().to_peer_id())?;
-            
-            Ok(PeerBehaviour {
-                chord_routing,
-                mdns,
-            })
-        })?
-        .with_swarm_config(|c| {
-            c.with_idle_connection_timeout(Duration::from_secs(60))
-             .with_protocol_version(CHORD_PROTOCOL)
-        })
-        .build();
-
-    Ok(swarm)
-}
-
-// Helper function to extract gRPC port from multiaddr
-fn extract_grpc_port(addr: &Multiaddr) -> Option<u16> {
-    for proto in addr.iter() {
-        if let Protocol::Tcp(port) = proto {
-            return Some(port);
-        }
-    }
-    None
 }
 
 // Helper function to get a random available port

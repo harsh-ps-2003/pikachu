@@ -22,6 +22,9 @@ pub enum NetworkError {
     
     #[error("Peer unreachable: {0}")]
     PeerUnreachable(String),
+
+    #[error("Invalid address: {0}")]
+    InvalidAddress(String),
 }
 
 #[derive(Error, Debug)]

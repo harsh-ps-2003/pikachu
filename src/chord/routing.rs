@@ -10,7 +10,6 @@ use libp2p::{
         THandler,
         THandlerInEvent,
         THandlerOutEvent,
-        NetworkBehaviourAction,
     },
     PeerId,
     Multiaddr,
@@ -89,7 +88,7 @@ impl ChordRoutingBehaviour {
     }
 
     fn is_between(&self, peer: &PeerId, start: &NodeId, end: &NodeId) -> bool {
-        let peer_id = NodeId::from(peer.to_bytes());
+        let peer_id = NodeId::from(*peer);
         peer_id > *start && peer_id <= *end
     }
 
@@ -101,86 +100,6 @@ impl ChordRoutingBehaviour {
     pub fn handle_peer_expired(&mut self, peer_id: &PeerId) {
         // Implementation needed
         unimplemented!()
-    }
-}
-
-impl NetworkBehaviour for ChordRoutingBehaviour {
-    type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
-    type ToSwarm = ChordRoutingEvent;
-
-    fn handle_established_connection(
-        &mut self,
-        peer_id: PeerId,
-        conn: ConnectionId,
-        role_override: Option<libp2p::core::Endpoint>,
-        _: Option<&Vec<u8>>,
-    ) {
-        // Add protocol identifier to connection metadata
-        let protocol_version = CHORD_PROTOCOL.to_vec();
-        self.connected_peers
-            .entry(peer_id)
-            .or_default()
-            .push(conn);
-    }
-
-    fn handle_pending_outbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        _maybe_peer: Option<PeerId>,
-        _addresses: &[Multiaddr],
-        _effective_role: libp2p::core::Endpoint,
-    ) -> Result<Vec<Multiaddr>, ConnectionDenied> {
-        Ok(Vec::new())
-    }
-
-    fn handle_pending_inbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        _local_addr: &Multiaddr,
-        _remote_addr: &Multiaddr,
-    ) -> Result<(), ConnectionDenied> {
-        Ok(())
-    }
-
-    fn handle_connection_closed(
-        &mut self,
-        peer_id: PeerId,
-        conn: ConnectionId,
-        _: libp2p::core::Endpoint,
-        _: Option<&Vec<u8>>,
-    ) {
-        if let Some(connections) = self.connected_peers.get_mut(&peer_id) {
-            connections.retain(|c| c != &conn);
-            if connections.is_empty() {
-                self.connected_peers.remove(&peer_id);
-            }
-        }
-    }
-
-    fn poll(
-        &mut self,
-        _: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        Poll::Pending
-    }
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        peer: PeerId,
-        _local_addr: &Multiaddr,
-        _remote_addr: &Multiaddr,
-    ) -> Result<(), ConnectionDenied> {
-        Ok(())
-    }
-
-    fn handle_established_outbound_connection(
-        &mut self,
-        _connection_id: ConnectionId,
-        peer: PeerId,
-        _addr: &Multiaddr,
-    ) -> Result<(), ConnectionDenied> {
-        Ok(())
     }
 }
 

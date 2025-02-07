@@ -15,6 +15,7 @@ use crate::network::messages::chord::{
     ReplicateRequest, ReplicateResponse,
     NodeInfo,
 };
+use chrono::Utc;
 
 #[derive(Debug)]
 pub struct ChordGrpcServer {
@@ -100,11 +101,17 @@ impl ChordNode for ChordGrpcServer {
         match self.chord_handle.join(node_id).await {
             Ok(_) => Ok(Response::new(JoinResponse {
                 success: true,
+                successor: Some(self.chord_handle.state.successor_list[0].into()),
+                predecessor: Some(self.chord_handle.state.predecessor.unwrap().into()),
+                transferred_data: Vec::new(),
                 error: String::new(),
             })),
             Err(e) => Ok(Response::new(JoinResponse {
                 success: false,
                 error: e.to_string(),
+                successor: None,
+                predecessor: None,
+                transferred_data: Vec::new(),
             })),
         }
     }
@@ -119,11 +126,11 @@ impl ChordNode for ChordGrpcServer {
         
         match self.chord_handle.notify(node_id).await {
             Ok(_) => Ok(Response::new(NotifyResponse {
-                success: true,
+                accepted: true,
                 error: String::new(),
             })),
             Err(e) => Ok(Response::new(NotifyResponse {
-                success: false,
+                accepted: false,
                 error: e.to_string(),
             })),
         }
@@ -135,10 +142,12 @@ impl ChordNode for ChordGrpcServer {
     ) -> Result<Response<StabilizeResponse>, Status> {
         match self.chord_handle.stabilize().await {
             Ok(_) => Ok(Response::new(StabilizeResponse {
+                predecessor: Some(self.chord_handle.state.predecessor.unwrap().into()),
                 success: true,
                 error: String::new(),
             })),
             Err(e) => Ok(Response::new(StabilizeResponse {
+                predecessor: None,
                 success: false,
                 error: e.to_string(),
             })),
@@ -194,10 +203,9 @@ impl ChordNode for ChordGrpcServer {
         &self,
         _request: Request<HeartbeatRequest>,
     ) -> Result<Response<HeartbeatResponse>, Status> {
-        // Simple heartbeat response - if we can respond, we're alive
         Ok(Response::new(HeartbeatResponse {
-            success: true,
-            error: String::new(),
+            alive: true,
+            timestamp: Utc::now().to_rfc3339(),
         }))
     }
 

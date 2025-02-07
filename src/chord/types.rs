@@ -2,7 +2,7 @@ use sha2::{Sha256, Digest};
 use std::fmt;
 use std::collections::HashMap;
 use crate::error::ChordError;
-use libp2p::{PeerId, Multiaddr};
+use libp2p::{PeerId, Multiaddr, multiaddr::Protocol};
 
 /*
 While the NodeId is used for routing and determining data responsibility in the ring, 

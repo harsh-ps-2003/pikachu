@@ -1,8 +1,10 @@
 # Pikachu 
 
-A Byzantine Fault Tolerant Distributed Hash Table implementation.
+A Byzantine Fault Tolerant in-memory Distributed Hash Table implementation.
 
 ### System Design
+
+Its not crash fault tolerant.
 
 PeerId is provided by libp2p and is used at the networking layer for peer discovery, connection establishment, and secure communication. When you run a node, libp2p generates a unique PeerId for that instance. NodeId is derived from the PeerId and is used for the overlay routing in the Chord DHT. The Chord protocol uses NodeIds to determine the position of each node within the ring and to decide which node is responsible for a particular key. Every node runs its own gRPC server which is bound to an address such as "http://127.0.0.1:{port}". This server is the entry point for application-level (DHT) requests.
 
