@@ -2,7 +2,7 @@ use tonic::{Request, Response, Status};
 use crate::chord::actor::ChordHandle;
 use crate::chord::types::{Key, Value, NodeId};
 use crate::network::messages::chord::{
-    ChordNode, ChordNodeServer,
+    chord_node_server::{ChordNode, ChordNodeServer},
     LookupRequest, LookupResponse,
     PutRequest, PutResponse,
     GetRequest, GetResponse,
@@ -12,9 +12,9 @@ use crate::network::messages::chord::{
     FindSuccessorRequest, FindSuccessorResponse,
     GetPredecessorRequest, GetPredecessorResponse,
     HeartbeatRequest, HeartbeatResponse,
+    ReplicateRequest, ReplicateResponse,
     NodeInfo,
 };
-use crate::network::messages::message::{ReplicateRequest, ReplicateResponse};
 
 #[derive(Debug)]
 pub struct ChordGrpcServer {

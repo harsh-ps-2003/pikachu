@@ -466,7 +466,7 @@ impl ChordActor {
 
 /// Actor handle for interacting with the ChordActor
 /// The server handles gRPC requests and forwards them to the Chord actor via ChordHandle
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ChordHandle {
     sender: mpsc::Sender<ChordMessage>,
 }

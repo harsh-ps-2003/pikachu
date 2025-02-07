@@ -1,5 +1,4 @@
 use crate::chord::actor::{ChordActor, ChordHandle, ChordMessage};
-use crate::network::messages::message::Message;
 use crate::error::*;
 use crate::network::grpc::PeerConfig;
 use libp2p::{
@@ -9,13 +8,14 @@ use libp2p::{
     noise,
     swarm::{NetworkBehaviour, SwarmEvent},
     tcp, yamux, PeerId, Multiaddr,
+    multiaddr::Protocol,
 };
 #[allow(unused_imports)]
 use libp2p::swarm::derive_prelude::*;
 use log::{debug, error, info, warn};
 use std::error::Error as StdError;
 use std::time::Duration;
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 use tokio::{io, select, time::sleep};
 use crate::chord::{
     routing::{ChordRoutingBehaviour, ChordRoutingEvent}, 
@@ -23,7 +23,6 @@ use crate::chord::{
 };
 use crate::network::grpc::{client::ChordGrpcClient, server::ChordGrpcServer};
 use crate::chord::CHORD_PROTOCOL;
-use std::sync::oneshot;
 use std::collections::HashMap;
 
 #[derive(NetworkBehaviour)]
@@ -174,27 +173,25 @@ impl ChordPeer {
         Ok(())
     }
 
-    /// Get gRPC address for a node
+    /// Get gRPC address for a node. Since we're using mDNS, we assume localhost
     fn get_grpc_address(&self, node_id: &NodeId) -> Result<String, NetworkError> {
         let addr = self.discovered_peers.get(node_id)
             .ok_or_else(|| NetworkError::PeerNotFound(format!("No address for node {}", node_id)))?;
             
-        // Extract host and port from multiaddr
-        let mut host = None;
+        // Extract port from multiaddr
         let mut port = None;
         
         for proto in addr.iter() {
-            match proto {
-                Protocol::Ip4(ip) => host = Some(ip.to_string()),
-                Protocol::Tcp(p) => port = Some(p),
-                _ => {}
+            if let Protocol::Tcp(p) = proto {
+                port = Some(p);
+                break;
             }
         }
         
-        match (host, port) {
-            (Some(h), Some(p)) => Ok(format!("http://{}:{}", h, p)),
-            _ => Err(NetworkError::InvalidAddress(
-                format!("Invalid multiaddr format: {}", addr)
+        match port {
+            Some(p) => Ok(format!("http://127.0.0.1:{}", p)),
+            None => Err(NetworkError::InvalidAddress(
+                format!("No TCP port in address: {}", addr)
             ))
         }
     }

@@ -321,7 +321,7 @@ pub mod chord_node_client {
             request: impl tonic::IntoRequest<super::JoinRequest>,
         ) -> std::result::Result<tonic::Response<super::JoinResponse>, tonic::Status> {
             self.inner
-                .ready()    
+                .ready()
                 .await
                 .map_err(|e| {
                     tonic::Status::unknown(

@@ -1,5 +1,5 @@
 use tonic::transport::Channel;
-use crate::network::messages::{
+use crate::network::messages::chord::{
     chord_node_client::ChordNodeClient,
     JoinRequest, JoinResponse,
     LookupRequest, LookupResponse,
