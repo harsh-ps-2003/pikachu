@@ -1,6 +1,6 @@
 # Pikachu 
 
-A Byzantine Fault Tolerant in-memory Distributed Hash Table implementation.
+A Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
 
 ### System Design
 

@@ -1,7 +1,7 @@
 pub mod actor;
 pub mod routing;
 pub mod types;
-
+pub mod workers;
 // Chord configuration
 pub const SUCCESSOR_LIST_SIZE: usize = 8;
 pub const STABILIZE_INTERVAL: u64 = 30;

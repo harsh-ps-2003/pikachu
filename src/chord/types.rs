@@ -3,6 +3,7 @@ use std::fmt;
 use std::collections::HashMap;
 use crate::error::ChordError;
 use libp2p::{PeerId, Multiaddr, multiaddr::Protocol};
+use std::sync::{Arc, Mutex};
 
 /*
 While the NodeId is used for routing and determining data responsibility in the ring, 
@@ -91,6 +92,44 @@ impl NodeId {
         
         NodeId(result)
     }
+
+    pub fn new(id: [u8; 32]) -> Self {
+        NodeId(id)
+    }
+
+    // Check if this node is between start and end in the ring
+    pub fn is_between(&self, start: &NodeId, end: &NodeId) -> bool {
+        if start == end {
+            return true;
+        }
+        if start < end {
+            self > start && self <= end
+        } else {
+            self > start || self <= end
+        }
+    }
+
+    // Get the n-th finger (n is 0-based)
+    pub fn get_finger_id(&self, n: usize) -> NodeId {
+        assert!(n < KEY_SIZE);
+        let mut result = self.0;
+        let byte_idx = n / 8;
+        let bit_idx = n % 8;
+        
+        // Set the n-th bit
+        result[byte_idx] |= 1 << bit_idx;
+        
+        // Clear all bits after n
+        for i in byte_idx..32 {
+            if i == byte_idx {
+                result[i] &= !(0xFF >> (8 - bit_idx));
+            } else {
+                result[i] = 0;
+            }
+        }
+        
+        NodeId(result)
+    }
 }
 
 impl From<PeerId> for NodeId {
@@ -168,3 +207,102 @@ pub struct Key(pub Vec<u8>);
 /// Value type for storing data in the DHT
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Value(pub Vec<u8>);
+
+// Number of bits in the key space (using SHA-256)
+pub const KEY_SIZE: usize = 256;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct FingerEntry {
+    pub start: NodeId,      // Start of the finger interval
+    pub interval_end: NodeId, // End of the finger interval
+    pub node: Option<PeerId>, // Node that succeeds start
+}
+
+#[derive(Debug)]
+pub struct FingerTable {
+    pub entries: Vec<FingerEntry>,
+    pub node_id: NodeId,
+}
+
+impl FingerTable {
+    pub fn new(node_id: NodeId) -> Self {
+        let mut entries = Vec::with_capacity(KEY_SIZE);
+        
+        for i in 0..KEY_SIZE {
+            let start = node_id.get_finger_id(i);
+            let interval_end = if i == KEY_SIZE - 1 {
+                node_id
+            } else {
+                node_id.get_finger_id(i + 1)
+            };
+            
+            entries.push(FingerEntry {
+                start,
+                interval_end,
+                node: None,
+            });
+        }
+        
+        FingerTable {
+            entries,
+            node_id,
+        }
+    }
+
+    pub fn update_finger(&mut self, index: usize, node: PeerId) {
+        if index < self.entries.len() {
+            self.entries[index].node = Some(node);
+        }
+    }
+
+    pub fn get_successor(&self) -> Option<PeerId> {
+        self.entries.first().and_then(|entry| entry.node)
+    }
+
+    pub fn find_closest_preceding_node(&self, id: &NodeId) -> Option<PeerId> {
+        for entry in self.entries.iter().rev() {
+            if let Some(node) = entry.node {
+                let node_id = NodeId::from_peer_id(&node);
+                if node_id.is_between(&self.node_id, id) {
+                    return Some(node);
+                }
+            }
+        }
+        None
+    }
+}
+
+pub type SharedFingerTable = Arc<Mutex<FingerTable>>;
+
+// Shared state types for thread-safe access
+pub type SharedStorage = Arc<Mutex<HashMap<Key, Value>>>;
+pub type SharedPredecessor = Arc<Mutex<Option<NodeId>>>;
+pub type SharedSuccessorList = Arc<Mutex<Vec<NodeId>>>;
+
+// Thread configuration
+#[derive(Clone)]
+pub struct ThreadConfig {
+    pub local_addr: String,
+    pub finger_table: SharedFingerTable,
+    pub storage: SharedStorage,
+    pub predecessor: SharedPredecessor,
+    pub successor_list: SharedSuccessorList,
+}
+
+impl ThreadConfig {
+    pub fn new(
+        local_addr: String,
+        finger_table: SharedFingerTable,
+        storage: SharedStorage,
+        predecessor: SharedPredecessor,
+        successor_list: SharedSuccessorList,
+    ) -> Self {
+        Self {
+            local_addr,
+            finger_table,
+            storage,
+            predecessor,
+            successor_list,
+        }
+    }
+}

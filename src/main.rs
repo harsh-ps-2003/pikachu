@@ -2,9 +2,14 @@ use clap::{Parser, Subcommand};
 use libp2p::Multiaddr;
 use log::{error, info};
 use std::str::FromStr;
+use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
 use pikachu::{
     network::{node::ChordPeer, grpc::PeerConfig},
-    chord::types::NodeId,
+    chord::{
+        types::{NodeId, ThreadConfig, SharedFingerTable, SharedStorage, SharedPredecessor, SharedSuccessorList},
+        workers::{run_stabilize_worker, run_predecessor_checker, run_finger_maintainer, run_successor_maintainer},
+    },
     error::NetworkError,
 };
 
@@ -49,6 +54,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             let mut peer = ChordPeer::new(config).await
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
+            // Initialize shared state
+            let finger_table = Arc::new(Mutex::new(peer.get_finger_table().clone()));
+            let storage = Arc::new(Mutex::new(HashMap::new()));
+            let predecessor = Arc::new(Mutex::new(None));
+            let successor_list = Arc::new(Mutex::new(Vec::new()));
+
+            // Create thread configuration
+            let local_addr = format!("http://127.0.0.1:{}", peer.get_port());
+            let thread_config = ThreadConfig::new(
+                local_addr.clone(),
+                finger_table.clone(),
+                storage.clone(),
+                predecessor.clone(),
+                successor_list.clone(),
+            );
+
             // If bootstrap address provided, join network
             if let Some(bootstrap_addr) = bootstrap {
                 info!("Joining network through bootstrap node: {}", bootstrap_addr);
@@ -63,11 +84,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Starting as bootstrap node");
             }
 
-            // Run the peer
-            if let Err(e) = peer.run().await {
-                error!("Peer error: {}", e);
-                std::process::exit(1);
+            // Spawn worker threads
+            let stabilize_handle = tokio::spawn(run_stabilize_worker(thread_config.clone()));
+            let predecessor_handle = tokio::spawn(run_predecessor_checker(thread_config.clone()));
+            let finger_handle = tokio::spawn(run_finger_maintainer(thread_config.clone()));
+            let successor_handle = tokio::spawn(run_successor_maintainer(thread_config.clone()));
+
+            // Run the peer and wait for all tasks
+            let peer_handle = tokio::spawn(async move {
+                if let Err(e) = peer.run().await {
+                    error!("Peer error: {}", e);
+                }
+            });
+
+            // Wait for all tasks to complete
+            tokio::select! {
+                _ = stabilize_handle => error!("Stabilize worker exited"),
+                _ = predecessor_handle => error!("Predecessor checker exited"),
+                _ = finger_handle => error!("Finger maintainer exited"),
+                _ = successor_handle => error!("Successor maintainer exited"),
+                _ = peer_handle => error!("Peer exited"),
             }
+
+            std::process::exit(1);
         }
     }
 

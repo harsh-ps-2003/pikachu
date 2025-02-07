@@ -17,14 +17,23 @@ pub enum PikachuError {
 
 #[derive(Error, Debug)]
 pub enum NetworkError {
-    #[error("Connection failed: {0}")]
-    ConnectionFailed(String),
-    
-    #[error("Peer unreachable: {0}")]
-    PeerUnreachable(String),
+    #[error("Transport error: {0}")]
+    Transport(String),
 
     #[error("Invalid address: {0}")]
     InvalidAddress(String),
+
+    #[error("Chord error: {0}")]
+    Chord(#[from] ChordError),
+
+    #[error("gRPC error: {0}")]
+    Grpc(String),
+
+    #[error("IO error: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("Connection denied: {0}")]
+    ConnectionDenied(#[from] ConnectionDeniedError),
 }
 
 #[derive(Error, Debug)]
@@ -49,6 +58,9 @@ pub enum ChordError {
     
     #[error("Invalid request: {0}")]
     InvalidRequest(String),
+
+    #[error("Operation failed: {0}")]
+    OperationFailed(String),
 }
 
 #[derive(Error, Debug)]
@@ -79,4 +91,10 @@ pub enum MessageError {
     
     #[error("Message timeout")]
     Timeout,
+}
+
+#[derive(Error, Debug)]
+pub enum ConnectionDeniedError {
+    #[error("Connection denied: {0}")]
+    Custom(String),
 }
