@@ -1,10 +1,16 @@
 # Pikachu 
 
-A Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
+A single-dimensional asynchronous Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
 
 ### System Design
 
 Its not crash fault tolerant.
+
+The core lookup logic is spread across multiple components:
+ChordNode: Maintains node state and core DHT operations
+ChordGrpcServer: Handles RPC requests for lookups
+ChordRoutingBehaviour: Manages routing table and successor/predecessor relationships
+ChordActor: Handles message passing and coordination
 
 PeerId is provided by libp2p and is used at the networking layer for peer discovery, connection establishment, and secure communication. When you run a node, libp2p generates a unique PeerId for that instance. NodeId is derived from the PeerId and is used for the overlay routing in the Chord DHT. The Chord protocol uses NodeIds to determine the position of each node within the ring and to decide which node is responsible for a particular key. Every node runs its own gRPC server which is bound to an address such as "http://127.0.0.1:{port}". This server is the entry point for application-level (DHT) requests.
 
@@ -85,6 +91,151 @@ If needed, actor uses ChordGrpcClient to make outgoing requests
 Response flows back through the chain
 
 In Chord, when a node joins the network, its successor node is responsible for transferring the relevant keys to the new node. Similarly, when a node leaves, its keys should be redistributed to the remaining nodes to prevent data loss. The replicate method in the gRPC service is likely part of this data transfer process.
+
+The gRPC thread implementation (GrpcThread in thread.rs) shows:
+Takes ownership of ChordNode (Arc-wrapped) and ThreadConfig during initialization
+2. Creates ChordGrpcServer with node+config dependencies
+3. Uses serve_with_shutdown for graceful termination
+4. Runs in isolation from other network components
+5. Depends on shared state (storage, finger table, predecessor) through ThreadConfig
+Key integration points:
+Shares Mutex-protected state with worker threads
+Receives RPC calls that modify core Chord state
+Depends on proper synchronization of node_addresses map
+
+Isolation of Network I/O - By separating gRPC handling into its own thread
+Thread-Safe State Management - Uses Arc+Mutex patterns to share chord state
+Decoupling from P2P Layer - The gRPC interface acts as a bridge between:
+libp2p-based peer discovery
+Chord's DHT operations
+External clients using gRPC
+4. Graceful Shutdown Coordination - Clean integration with actor system
+
+Key advantages of this approach:
+Stability: gRPC server can't block Chord operations
+Performance: Async I/O doesn't interfere with stabilization tasks
+Testability: gRPC interface can be validated independently
+Observability: Clear separation of network metrics
+
+Hexagonal Architecture - gRPC acts as a "port" implementation adhering to:
+Core Chord domain (center)
+Multiple transport adapters (gRPC, libp2p, etc)
+2. Actor Model Alignment - Thread separation matches:
+Message-passing concurrency
+Clear ownership boundaries
+Backpressure through channel sizing
+3. State Consistency - Shared Mutexes ensure:
+Single writer principle for critical data
+Lock ordering (successor_list → predecessor → storage)
+Linearizable operations through message sequencing
+
+Handoff RPC Implementation:
+Added a new handoff RPC method that uses client-streaming
+The server receives a stream of HandoffRequest messages containing key-value pairs
+Uses Tokio's channels and streams for efficient streaming
+Processes data in chunks without loading everything into memory
+Server-side Handoff:
+ChordGrpcServer implements the handoff endpoint
+Uses a mutex-protected storage for thread-safe access
+Processes the stream incrementally, storing each key-value pair
+Returns the total number of transferred items
+Client-side Handoff:
+ChordGrpcClient implements the streaming client
+Takes a generic stream of HandoffRequest messages
+Handles connection and streaming errors appropriately
+Graceful Shutdown Process:
+When shutdown signal is received, the gRPC thread:
+Gets the successor node from the successor list
+Establishes a connection to the successor
+Streams all local data to the successor
+Waits for transfer completion before shutting down
+Uses proper error handling and logging throughout
+Ensures data consistency during shutdown
+Efficiency Features:
+Uses streaming to avoid memory pressure
+Processes data in chunks
+Maintains thread safety with proper locking
+Provides detailed logging for monitoring
+Handles all error cases gracefully
+The implementation ensures that no data is lost during a graceful shutdown by transferring all key-value pairs to the successor node before terminating. The streaming approach makes this process efficient and scalable, even with large amounts of data.
+
+Stabilization Worker (run_stabilize_worker):
+Runs periodically (every 30 seconds)
+Main responsibilities:
+1. Gets current successor from successor list
+Connects to successor via gRPC
+Gets successor's predecessor (x)
+If x is between us and our successor, updates successor to x
+5. Notifies successor about our existence
+Error handling:
+Handles lock acquisition failures
+Handles network errors gracefully
+Logs all errors but continues running
+Finger Table Maintenance (run_fix_fingers_worker):
+Runs periodically (every 45 seconds)
+Main responsibilities:
+Maintains a round-robin counter for finger table entries
+Calculates the ID for the current finger entry
+Finds the successor for that ID
+Updates the finger table entry
+Uses the helper function find_successor for lookups
+Continues to next finger on failure
+Find Successor Helper (find_successor):
+Implements the core Chord lookup algorithm:
+Checks if ID is between us and our immediate successor
+If not, finds closest preceding node from finger table
+Forwards query to that node
+Handles all error cases:
+Lock acquisition failures
+Network errors
+Missing node addresses
+Key Features:
+Thread-safe access to shared state via mutexes
+Efficient timing using tokio::time
+Comprehensive error handling and logging
+Non-blocking async/await throughout
+Graceful handling of network failures
+
+Heartbeat:
+Checks predecessor every 15 seconds
+Allows up to 3 retry attempts before marking a node as failed
+Uses short delays between retries (500ms)
+Implements exponential backoff with retries
+Creates new client for each attempt to avoid stale connections
+Handles both connection and heartbeat failures
+Clears predecessor reference when node is unreachable
+Triggers immediate stabilization to repair the ring
+Logs all failure events for debugging
+
+1. Recursive Lookup
+How It Works
+
+    The querying node sends the request to the closest preceding node (according to the finger table).
+    That node processes the request and forwards it to the next closest node.
+    This process continues until the responsible node is found, which then returns the value.
+
+Advantages
+
+✅ Lower latency in ideal conditions:
+
+    Since nodes forward the request directly, the lookup can be faster in a low-latency network.
+    The request follows a single path through the network, reducing the number of back-and-forth messages.
+
+✅ Less burden on the querying node:
+
+    The node initiating the request does not need to track intermediate responses.
+    The lookup is handled by the network itself.
+
+Disadvantages
+
+❌ Higher risk of failure propagation:
+
+    If a node along the lookup path fails, the query may be lost.
+    There is no way for the initiating node to retry from the last known node unless redundancy is built in.
+
+❌ Potentially higher network congestion:
+
+    If nodes are overloaded, they might become bottlenecks when processing multiple lookup requests.
 
 ### Demo
 

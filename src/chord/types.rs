@@ -10,6 +10,15 @@ While the NodeId is used for routing and determining data responsibility in the 
 the PeerId is still essential for working with network layer.
 */
 
+pub type SharedFingerTable = Arc<Mutex<FingerTable>>;
+
+// Shared state types for thread-safe access
+pub type SharedStorage = Arc<Mutex<HashMap<Key, Value>>>;
+pub type SharedPredecessor = Arc<Mutex<Option<NodeId>>>;
+pub type SharedSuccessorList = Arc<Mutex<Vec<NodeId>>>;
+
+// Number of bits in the key space (using SHA-256)
+pub const KEY_SIZE: usize = 256;
 /// NodeId represents a unique position in the Chord ring for a particular Node
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct NodeId([u8; 32]);
@@ -138,79 +147,6 @@ impl From<PeerId> for NodeId {
     }
 }
 
-/// ChordState represents the local state within our Chord node.
-pub struct ChordState {
-    pub node_id: NodeId,
-    pub predecessor: Option<NodeId>,
-    pub successor_list: Vec<NodeId>,
-    pub finger_table: Vec<Option<NodeId>>,
-    pub storage: HashMap<Key, Value>,
-    pub node_addresses: HashMap<NodeId, Multiaddr>,  // Single source of truth for node addresses
-}
-
-impl ChordState {
-    pub fn new(node_id: NodeId, addr: Multiaddr) -> Self {
-        let mut state = Self {
-            node_id,
-            predecessor: None,
-            successor_list: Vec::new(),
-            finger_table: vec![None; 256],
-            storage: HashMap::new(),
-            node_addresses: HashMap::new(),
-        };
-        state.node_addresses.insert(node_id, addr);
-        state
-    }
-
-    /// Get the multiaddr for a node if it exists
-    pub fn get_multiaddr(&self, node_id: &NodeId) -> Option<&Multiaddr> {
-        self.node_addresses.get(node_id)
-    }
-
-    /// Helper to get the immediate successor from the successor list
-    pub fn successor(&self) -> Option<NodeId> {
-        self.successor_list.first().copied()
-    }
-
-    /// Get gRPC address from multiaddr
-    pub fn to_grpc_addr(addr: Multiaddr) -> Result<String, ChordError> {
-        let mut host = String::new();
-        let mut port = None;
-
-        // Extract host and port from Multiaddr
-        for protocol in addr.iter() {
-            match protocol {
-                Protocol::Ip4(ip) => host = ip.to_string(),
-                Protocol::Ip6(ip) => host = format!("[{}]", ip),
-                Protocol::Tcp(p) => port = Some(p),
-                _ => continue,
-            }
-        }
-
-        if let Some(port) = port {
-            Ok(format!("{}:{}", host, port))
-        } else {
-            Err(ChordError::InvalidRequest("Missing port in address".into()))
-        }
-    }
-
-    pub fn add_known_node(&mut self, node_id: NodeId) {
-        // Update finger tables, successor lists etc. as needed
-        // This is purely Chord protocol state management
-    }
-}
-
-/// Key type for storing data in the DHT
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub struct Key(pub Vec<u8>);
-
-/// Value type for storing data in the DHT
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Value(pub Vec<u8>);
-
-// Number of bits in the key space (using SHA-256)
-pub const KEY_SIZE: usize = 256;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FingerEntry {
     pub start: NodeId,      // Start of the finger interval
@@ -272,13 +208,6 @@ impl FingerTable {
     }
 }
 
-pub type SharedFingerTable = Arc<Mutex<FingerTable>>;
-
-// Shared state types for thread-safe access
-pub type SharedStorage = Arc<Mutex<HashMap<Key, Value>>>;
-pub type SharedPredecessor = Arc<Mutex<Option<NodeId>>>;
-pub type SharedSuccessorList = Arc<Mutex<Vec<NodeId>>>;
-
 // Thread configuration
 #[derive(Clone)]
 pub struct ThreadConfig {
@@ -306,3 +235,292 @@ impl ThreadConfig {
         }
     }
 }
+
+/// ChordNode manages the initialization and state of a Chord node
+pub struct ChordNode {
+    // Core node identity
+    pub node_id: NodeId,
+    pub local_addr: String,
+    
+    // Thread-safe shared state
+    pub finger_table: SharedFingerTable,
+    pub storage: SharedStorage,
+    pub predecessor: SharedPredecessor,
+    pub successor_list: SharedSuccessorList,
+    
+    // Address management
+    pub node_addresses: Arc<Mutex<HashMap<NodeId, Multiaddr>>>,
+}
+
+impl ChordNode {
+    pub async fn new(node_id: NodeId, local_addr: String) -> Self {
+        let finger_table = Arc::new(Mutex::new(FingerTable::new(node_id)));
+        let storage = Arc::new(Mutex::new(HashMap::new()));
+        let predecessor = Arc::new(Mutex::new(None));
+        let successor_list = Arc::new(Mutex::new(Vec::new()));
+        let node_addresses = Arc::new(Mutex::new(HashMap::new()));
+
+        Self {
+            node_id,
+            local_addr,
+            finger_table,
+            storage,
+            predecessor,
+            successor_list,
+            node_addresses,
+        }
+    }
+
+    pub async fn join_network(&mut self, bootstrap_addr: Option<String>) -> Result<(), ChordError> {
+        if let Some(addr) = bootstrap_addr {
+            // Join existing network
+            let mut client = ChordGrpcClient::new(addr)
+                .await
+                .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+
+            // Find our successor
+            let successor_info = client.find_successor(self.node_id.to_bytes().to_vec())
+                .await
+                .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+
+            // Initialize finger table
+            self.init_finger_table(successor_info)
+                .await
+                .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+
+            // Transfer keys from successor
+            self.transfer_keys_from_successor()
+                .await
+                .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+        } else {
+            // Create new network
+            let mut finger_table = self.finger_table.lock().unwrap();
+            for i in 0..KEY_SIZE {
+                finger_table.update_finger(i, self.node_id.to_peer_id().unwrap());
+            }
+            drop(finger_table);
+
+            let mut successor_list = self.successor_list.lock().unwrap();
+            successor_list.push(self.node_id);
+        }
+
+        Ok(())
+    }
+
+    async fn init_finger_table(&mut self, successor_info: NodeInfo) -> Result<(), ChordError> {
+        let successor_id = NodeId::from_bytes(&successor_info.id);
+        let successor_addr = successor_info.addr;
+
+        // Set immediate successor
+        {
+            let mut finger_table = self.finger_table.lock().unwrap();
+            finger_table.update_finger(0, successor_id.to_peer_id().unwrap());
+        }
+
+        // Initialize successor list
+        {
+            let mut successor_list = self.successor_list.lock().unwrap();
+            successor_list.push(successor_id);
+        }
+
+        // Create client for successor
+        let mut successor_client = ChordGrpcClient::new(successor_addr)
+            .await
+            .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+
+        // Initialize remaining fingers
+        for i in 1..KEY_SIZE {
+            let finger_id = self.node_id.get_finger_id(i);
+            
+            // If finger_id is between us and our successor, use successor
+            if finger_id.is_between(&self.node_id, &successor_id) {
+                let mut finger_table = self.finger_table.lock().unwrap();
+                finger_table.update_finger(i, successor_id.to_peer_id().unwrap());
+            } else {
+                // Otherwise, find the appropriate node
+                let finger_info = successor_client.find_successor(finger_id.to_bytes().to_vec())
+                    .await
+                    .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+                
+                let mut finger_table = self.finger_table.lock().unwrap();
+                finger_table.update_finger(i, NodeId::from_bytes(&finger_info.id).to_peer_id().unwrap());
+            }
+        }
+
+        Ok(())
+    }
+
+    async fn transfer_keys_from_successor(&mut self) -> Result<(), ChordError> {
+        let successor_id = {
+            let finger_table = self.finger_table.lock().unwrap();
+            finger_table.get_successor()
+                .ok_or_else(|| ChordError::JoinFailed("No successor found".into()))?
+        };
+
+        let successor_addr = format!("http://127.0.0.1:{}", successor_id); // You'll need proper address mapping
+        let mut successor_client = ChordGrpcClient::new(successor_addr)
+            .await
+            .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+
+        // Get keys that should belong to us
+        let mut stream = successor_client.transfer_keys(self.node_id.to_bytes().to_vec())
+            .await
+            .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+
+        // Store received keys
+        while let Some(key_value) = stream.next().await {
+            let key_value = key_value.map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+            let mut storage = self.storage.lock().unwrap();
+            storage.insert(
+                Key(key_value.key),
+                Value(key_value.value),
+            );
+        }
+
+        Ok(())
+    }
+
+    pub fn get_shared_state(&self) -> ThreadConfig {
+        ThreadConfig::new(
+            self.local_addr.clone(),
+            self.finger_table.clone(),
+            self.storage.clone(),
+            self.predecessor.clone(),
+            self.successor_list.clone(),
+        )
+    }
+
+    // Add methods from ChordState
+    pub fn get_multiaddr(&self, node_id: &NodeId) -> Option<Multiaddr> {
+        self.node_addresses.lock().unwrap().get(node_id).cloned()
+    }
+
+    pub fn add_known_node(&mut self, node_id: NodeId, addr: Multiaddr) {
+        self.node_addresses.lock().unwrap().insert(node_id, addr);
+        
+        // Update finger table if needed
+        let mut finger_table = self.finger_table.lock().unwrap();
+        for i in 0..KEY_SIZE {
+            let finger_id = self.node_id.get_finger_id(i);
+            if finger_id.is_between(&self.node_id, &node_id) {
+                finger_table.update_finger(i, node_id.to_peer_id().unwrap());
+            }
+        }
+    }
+
+    pub fn get_successor(&self) -> Option<NodeId> {
+        self.successor_list.lock().unwrap().first().cloned()
+    }
+
+    pub fn to_grpc_addr(&self, addr: &Multiaddr) -> Result<String, ChordError> {
+        let mut host = String::new();
+        let mut port = None;
+
+        for protocol in addr.iter() {
+            match protocol {
+                Protocol::Ip4(ip) => host = ip.to_string(),
+                Protocol::Ip6(ip) => host = format!("[{}]", ip),
+                Protocol::Tcp(p) => port = Some(p),
+                _ => continue,
+            }
+        }
+
+        if let Some(port) = port {
+            Ok(format!("{}:{}", host, port))
+        } else {
+            Err(ChordError::InvalidRequest("Missing port in address".into()))
+        }
+    }
+
+    /// Check if this node owns the given key
+    pub fn owns_key(&self, key: &[u8]) -> bool {
+        let key_id = NodeId::from_key(key);
+        let predecessor = self.predecessor.lock()
+            .expect("Failed to acquire predecessor lock");
+        
+        match *predecessor {
+            Some(pred) => {
+                // We own the key if it's in range (predecessor, our_id]
+                key_id.is_between(&pred, &self.node_id)
+            }
+            None => true // If we have no predecessor, we own everything
+        }
+    }
+
+    /// Find the closest preceding node for a given key from our finger table
+    pub fn closest_preceding_node(&self, key: &[u8]) -> Option<NodeId> {
+        let key_id = NodeId::from_key(key);
+        let finger_table = self.finger_table.lock()
+            .expect("Failed to acquire finger table lock");
+        
+        // Check finger table entries from highest to lowest
+        for i in (0..KEY_SIZE).rev() {
+            if let Some(finger) = finger_table.entries[i].node {
+                let finger_id = NodeId::from_peer_id(&finger);
+                // Check if finger is between us and the target key
+                if finger_id.is_between(&self.node_id, &key_id) {
+                    return Some(finger_id);
+                }
+            }
+        }
+        None
+    }
+
+    /// Lookup a key in the DHT
+    pub async fn lookup_key(&self, key: &[u8]) -> Result<Option<Value>, ChordError> {
+        // First check if we own the key
+        if self.owns_key(key) {
+            let storage = self.storage.lock()
+                .expect("Failed to acquire storage lock");
+            return Ok(storage.get(&Key(key.to_vec())).cloned());
+        }
+
+        // If we don't own it, find the closest preceding node
+        let next_hop = match self.closest_preceding_node(key) {
+            Some(node) => node,
+            None => {
+                // If no closer node found, try our immediate successor
+                let successor_list = self.successor_list.lock()
+                    .expect("Failed to acquire successor list lock");
+                match successor_list.first() {
+                    Some(succ) => *succ,
+                    None => return Err(ChordError::NodeNotFound("No route to key".into()))
+                }
+            }
+        };
+
+        // Forward the lookup to the next hop
+        let addr = self.get_multiaddr(&next_hop)
+            .ok_or_else(|| ChordError::NodeNotFound(format!("No address for node {}", next_hop)))?;
+        
+        let grpc_addr = self.to_grpc_addr(&addr)?;
+        let mut client = ChordGrpcClient::new(grpc_addr)
+            .await
+            .map_err(|e| ChordError::OperationFailed(format!("Failed to connect: {}", e)))?;
+
+        // Make the recursive lookup call
+        let response = client.get(GetRequest {
+            key: key.to_vec(),
+            requesting_node: Some(NodeInfo {
+                node_id: self.node_id.to_bytes().to_vec(),
+                address: self.local_addr.clone(),
+            }),
+        })
+        .await
+        .map_err(|e| ChordError::OperationFailed(format!("Lookup failed: {}", e)))?;
+
+        if response.success {
+            Ok(Some(Value(response.value)))
+        } else {
+            Ok(None)
+        }
+    }
+}
+
+/// Key type for storing data in the DHT
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct Key(pub Vec<u8>);
+
+/// Value type for storing data in the DHT
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Value(pub Vec<u8>);

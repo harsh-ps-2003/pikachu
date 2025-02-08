@@ -11,6 +11,8 @@ use libp2p::{
         THandler,
         THandlerInEvent,
         THandlerOutEvent,
+        ConnectionDenied,
+        PortUse,
     },
     PeerId,
     Multiaddr,
@@ -55,7 +57,7 @@ pub struct ChordRoutingBehaviour {
     // Node identity
     local_node_id: NodeId,
     
-    // Routing table
+    // Routing table 
     finger_table: SharedFingerTable,
     predecessor: Option<PeerId>,
     
@@ -256,7 +258,7 @@ impl NetworkBehaviour for ChordRoutingBehaviour {
         peer: PeerId,
         local_addr: &Multiaddr,
         remote_addr: &Multiaddr,
-    ) -> Result<THandler<Self>, ConnectionDeniedError> {
+    ) -> Result<THandler<Self>, ConnectionDenied> {
         self.connected_peers.entry(peer)
             .or_default()
             .push(connection_id);
@@ -270,8 +272,8 @@ impl NetworkBehaviour for ChordRoutingBehaviour {
         peer: PeerId,
         addr: &Multiaddr,
         role_override: Endpoint,
-        port_use: libp2p::swarm::PortUse,
-    ) -> Result<THandler<Self>, ConnectionDeniedError> {
+        port_use: PortUse,
+    ) -> Result<THandler<Self>, ConnectionDenied> {
         self.connected_peers.entry(peer)
             .or_default()
             .push(connection_id);

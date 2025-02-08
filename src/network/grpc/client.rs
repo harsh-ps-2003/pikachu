@@ -1,4 +1,6 @@
 use tonic::transport::Channel;
+use futures::Stream;
+use std::pin::Pin;
 use crate::network::messages::chord::{
     chord_node_client::ChordNodeClient,
     JoinRequest, JoinResponse,
@@ -11,6 +13,7 @@ use crate::network::messages::chord::{
     GetPredecessorRequest, GetPredecessorResponse,
     HeartbeatRequest, HeartbeatResponse,
     ReplicateRequest, ReplicateResponse,
+    HandoffRequest, HandoffResponse,
     NodeInfo, KeyValue,
 };
 use crate::error::NetworkError;
@@ -23,7 +26,7 @@ pub struct ChordGrpcClient {
 impl ChordGrpcClient {
     pub async fn new(addr: String) -> Result<Self, NetworkError> {
         let client = ChordNodeClient::connect(addr).await
-            .map_err(|e| NetworkError::ConnectionFailed(e.to_string()))?;
+            .map_err(|e| NetworkError::Grpc(format!("Failed to connect: {}", e)))?;
         
         Ok(Self { client })
     }
@@ -79,6 +82,23 @@ impl ChordGrpcClient {
             Ok(())
         } else {
             Err(NetworkError::PeerUnreachable(response.error))
+        }
+    }
+
+    pub async fn handoff<S>(&mut self, stream: S) -> Result<HandoffResponse, NetworkError>
+    where
+        S: Stream<Item = HandoffRequest> + Send + 'static,
+    {
+        let response = self.client
+            .handoff(stream)
+            .await
+            .map_err(|e| NetworkError::Grpc(format!("Handoff failed: {}", e)))?
+            .into_inner();
+
+        if response.success {
+            Ok(response)
+        } else {
+            Err(NetworkError::Grpc(response.error))
         }
     }
 

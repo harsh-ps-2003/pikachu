@@ -1,8 +1,11 @@
-use tonic::{Request, Response, Status};
-use crate::chord::actor::ChordHandle;
-use crate::chord::types::{Key, Value, NodeId};
+use tonic::{Request, Response, Status, Streaming};
+use std::sync::Arc;
+use futures::Stream;
+use futures::StreamExt;
+use std::pin::Pin;
+use crate::chord::types::{ChordNode, ThreadConfig, Key, Value, NodeId};
 use crate::network::messages::chord::{
-    chord_node_server::{ChordNode, ChordNodeServer},
+    chord_node_server::{ChordNode as ChordNodeService, ChordNodeServer},
     LookupRequest, LookupResponse,
     PutRequest, PutResponse,
     GetRequest, GetResponse,
@@ -13,31 +16,43 @@ use crate::network::messages::chord::{
     GetPredecessorRequest, GetPredecessorResponse,
     HeartbeatRequest, HeartbeatResponse,
     ReplicateRequest, ReplicateResponse,
-    NodeInfo,
+    HandoffRequest, HandoffResponse,
+    NodeInfo, KeyValue,
 };
 use chrono::Utc;
+use tokio_stream::wrappers::ReceiverStream;
+use tokio::sync::mpsc;
+use log::{debug, error};
 
 #[derive(Debug)]
 pub struct ChordGrpcServer {
-    chord_handle: ChordHandle,
+    node: Arc<ChordNode>,
+    config: ThreadConfig,
 }
 
 impl ChordGrpcServer {
-    pub fn new(chord_handle: ChordHandle) -> Self {
-        Self { chord_handle }
+    pub fn new(node: Arc<ChordNode>, config: ThreadConfig) -> Self {
+        Self { node, config }
     }
 }
 
 #[tonic::async_trait]
-impl ChordNode for ChordGrpcServer {
+impl ChordNodeService for ChordGrpcServer {
     async fn lookup(
         &self,
         request: Request<LookupRequest>,
     ) -> Result<Response<LookupResponse>, Status> {
         let req = request.into_inner();
-        match self.chord_handle.lookup(Key(req.key)).await {
+        let key_id = NodeId::from_key(&req.key);
+        
+        match self.node.find_successor(key_id).await {
             Ok(node) => Ok(Response::new(LookupResponse {
-                responsible_node: Some(node.into()),
+                responsible_node: Some(NodeInfo {
+                    node_id: node.to_bytes().to_vec(),
+                    address: self.node.get_multiaddr(&node)
+                        .ok_or_else(|| Status::internal("Node address not found"))?
+                        .to_string(),
+                }),
                 success: true,
                 error: String::new(),
             })),
@@ -49,45 +64,69 @@ impl ChordNode for ChordGrpcServer {
         }
     }
 
-    async fn put(
-        &self,
-        request: Request<PutRequest>,
-    ) -> Result<Response<PutResponse>, Status> {
+    async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
         let req = request.into_inner();
-        match self.chord_handle.put(Key(req.key), Value(req.value)).await {
-            Ok(_) => Ok(Response::new(PutResponse {
-                success: true,
-                error: String::new(),
-            })),
-            Err(e) => Ok(Response::new(PutResponse {
-                success: false,
-                error: e.to_string(),
-            })),
+        let key = req.key;
+
+        debug!("Received get request for key: {:?}", key);
+
+        // Use the lookup_key method to find the value
+        match self.node.lookup_key(&key).await {
+            Ok(Some(value)) => {
+                debug!("Found value for key");
+                Ok(Response::new(GetResponse {
+                    success: true,
+                    value: value.0,
+                    error: None,
+                }))
+            }
+            Ok(None) => {
+                debug!("Key not found");
+                Ok(Response::new(GetResponse {
+                    success: false,
+                    value: Vec::new(),
+                    error: Some("Key not found".into()),
+                }))
+            }
+            Err(e) => {
+                error!("Lookup failed: {}", e);
+                Err(Status::internal(format!("Lookup failed: {}", e)))
+            }
         }
     }
 
-    async fn get(
-        &self,
-        request: Request<GetRequest>,
-    ) -> Result<Response<GetResponse>, Status> {
+    async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
         let req = request.into_inner();
-        match self.chord_handle.get(&Key(req.key)).await {
-            Ok(Some(value)) => Ok(Response::new(GetResponse {
-                value: value.0,
-                success: true,
-                error: String::new(),
-            })),
-            Ok(None) => Ok(Response::new(GetResponse {
-                value: Vec::new(),
-                success: false,
-                error: "Key not found".to_string(),
-            })),
-            Err(e) => Ok(Response::new(GetResponse {
-                value: Vec::new(),
-                success: false,
-                error: e.to_string(),
-            })),
+        let key = req.key;
+        let value = req.value;
+
+        debug!("Received put request for key: {:?}", key);
+
+        // Check if we own the key
+        if !self.node.owns_key(&key) {
+            // Forward to the appropriate node
+            match self.node.lookup_key(&key).await {
+                Ok(_) => {
+                    // The key exists somewhere, but we don't own it
+                    return Err(Status::failed_precondition("Key belongs to another node"));
+                }
+                Err(e) => {
+                    error!("Failed to check key ownership: {}", e);
+                    return Err(Status::internal("Failed to check key ownership"));
+                }
+            }
         }
+
+        // Store the key-value pair
+        let mut storage = self.node.storage.lock()
+            .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
+        
+        storage.insert(Key(key), Value(value));
+        
+        Ok(Response::new(PutResponse {
+            success: true,
+            error: None,
+        }))
     }
 
     async fn join(
@@ -96,24 +135,36 @@ impl ChordNode for ChordGrpcServer {
     ) -> Result<Response<JoinResponse>, Status> {
         let req = request.into_inner();
         let node_id = NodeId::from_bytes(&req.node_id)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            .map_err(|_| Status::invalid_argument("Invalid node ID"))?;
         
-        match self.chord_handle.join(node_id).await {
-            Ok(_) => Ok(Response::new(JoinResponse {
-                success: true,
-                successor: Some(self.chord_handle.state.successor_list[0].into()),
-                predecessor: Some(self.chord_handle.state.predecessor.unwrap().into()),
-                transferred_data: Vec::new(),
-                error: String::new(),
-            })),
-            Err(e) => Ok(Response::new(JoinResponse {
-                success: false,
-                error: e.to_string(),
-                successor: None,
-                predecessor: None,
-                transferred_data: Vec::new(),
-            })),
+        let mut successor_list = self.config.successor_list.lock()
+            .map_err(|_| Status::internal("Failed to acquire successor list lock"))?;
+        let mut predecessor = self.config.predecessor.lock()
+            .map_err(|_| Status::internal("Failed to acquire predecessor lock"))?;
+        
+        // Add the joining node to our successor list if it should be
+        if successor_list.is_empty() || self.node.is_between(&node_id, &self.node.node_id, &successor_list[0]) {
+            successor_list.insert(0, node_id);
+            *predecessor = Some(node_id);
         }
+        
+        Ok(Response::new(JoinResponse {
+            success: true,
+            successor: Some(NodeInfo {
+                node_id: successor_list[0].to_bytes().to_vec(),
+                address: self.node.get_multiaddr(&successor_list[0])
+                    .ok_or_else(|| Status::internal("Successor address not found"))?
+                    .to_string(),
+            }),
+            predecessor: predecessor.as_ref().map(|p| NodeInfo {
+                node_id: p.to_bytes().to_vec(),
+                address: self.node.get_multiaddr(p)
+                    .ok_or_else(|| Status::internal("Predecessor address not found"))?
+                    .to_string(),
+            }),
+            transferred_data: Vec::new(),
+            error: String::new(),
+        }))
     }
 
     async fn notify(
@@ -122,36 +173,40 @@ impl ChordNode for ChordGrpcServer {
     ) -> Result<Response<NotifyResponse>, Status> {
         let req = request.into_inner();
         let node_id = NodeId::from_bytes(&req.node_id)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+            .map_err(|_| Status::invalid_argument("Invalid node ID"))?;
         
-        match self.chord_handle.notify(node_id).await {
-            Ok(_) => Ok(Response::new(NotifyResponse {
-                accepted: true,
-                error: String::new(),
-            })),
-            Err(e) => Ok(Response::new(NotifyResponse {
-                accepted: false,
-                error: e.to_string(),
-            })),
+        let mut predecessor = self.config.predecessor.lock()
+            .map_err(|_| Status::internal("Failed to acquire predecessor lock"))?;
+        
+        // Update predecessor if appropriate
+        if predecessor.is_none() || 
+           self.node.is_between(&node_id, &predecessor.unwrap(), &self.node.node_id) {
+            *predecessor = Some(node_id);
         }
+        
+        Ok(Response::new(NotifyResponse {
+            accepted: true,
+            error: String::new(),
+        }))
     }
 
     async fn stabilize(
         &self,
-        request: Request<StabilizeRequest>,
+        _request: Request<StabilizeRequest>,
     ) -> Result<Response<StabilizeResponse>, Status> {
-        match self.chord_handle.stabilize().await {
-            Ok(_) => Ok(Response::new(StabilizeResponse {
-                predecessor: Some(self.chord_handle.state.predecessor.unwrap().into()),
-                success: true,
-                error: String::new(),
-            })),
-            Err(e) => Ok(Response::new(StabilizeResponse {
-                predecessor: None,
-                success: false,
-                error: e.to_string(),
-            })),
-        }
+        let predecessor = self.config.predecessor.lock()
+            .map_err(|_| Status::internal("Failed to acquire predecessor lock"))?;
+        
+        Ok(Response::new(StabilizeResponse {
+            predecessor: predecessor.as_ref().map(|p| NodeInfo {
+                node_id: p.to_bytes().to_vec(),
+                address: self.node.get_multiaddr(p)
+                    .ok_or_else(|| Status::internal("Predecessor address not found"))?
+                    .to_string(),
+            }),
+            success: true,
+            error: String::new(),
+        }))
     }
 
     async fn find_successor(
@@ -159,12 +214,17 @@ impl ChordNode for ChordGrpcServer {
         request: Request<FindSuccessorRequest>,
     ) -> Result<Response<FindSuccessorResponse>, Status> {
         let req = request.into_inner();
-        let node_id = NodeId::from_bytes(&req.id)
-            .map_err(|e| Status::invalid_argument(e.to_string()))?;
+        let id = NodeId::from_bytes(&req.id)
+            .map_err(|_| Status::invalid_argument("Invalid node ID"))?;
         
-        match self.chord_handle.find_successor(node_id).await {
+        match self.node.find_successor(id).await {
             Ok(successor) => Ok(Response::new(FindSuccessorResponse {
-                successor: Some(successor.into()),
+                successor: Some(NodeInfo {
+                    node_id: successor.to_bytes().to_vec(),
+                    address: self.node.get_multiaddr(&successor)
+                        .ok_or_else(|| Status::internal("Successor address not found"))?
+                        .to_string(),
+                }),
                 success: true,
                 error: String::new(),
             })),
@@ -178,25 +238,21 @@ impl ChordNode for ChordGrpcServer {
 
     async fn get_predecessor(
         &self,
-        request: Request<GetPredecessorRequest>,
+        _request: Request<GetPredecessorRequest>,
     ) -> Result<Response<GetPredecessorResponse>, Status> {
-        match self.chord_handle.get_predecessor().await {
-            Ok(Some(pred)) => Ok(Response::new(GetPredecessorResponse {
-                predecessor: Some(pred.into()),
-                success: true,
-                error: String::new(),
-            })),
-            Ok(None) => Ok(Response::new(GetPredecessorResponse {
-                predecessor: None,
-                success: true,
-                error: String::new(),
-            })),
-            Err(e) => Ok(Response::new(GetPredecessorResponse {
-                predecessor: None,
-                success: false,
-                error: e.to_string(),
-            })),
-        }
+        let predecessor = self.config.predecessor.lock()
+            .map_err(|_| Status::internal("Failed to acquire predecessor lock"))?;
+        
+        Ok(Response::new(GetPredecessorResponse {
+            predecessor: predecessor.as_ref().map(|p| NodeInfo {
+                node_id: p.to_bytes().to_vec(),
+                address: self.node.get_multiaddr(p)
+                    .ok_or_else(|| Status::internal("Predecessor address not found"))?
+                    .to_string(),
+            }),
+            success: true,
+            error: String::new(),
+        }))
     }
 
     async fn heartbeat(
@@ -214,18 +270,76 @@ impl ChordNode for ChordGrpcServer {
         request: Request<ReplicateRequest>,
     ) -> Result<Response<ReplicateResponse>, Status> {
         let req = request.into_inner();
+        let mut storage = self.config.storage.lock()
+            .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
         
         // Store all received key-value pairs
         for kv in req.data {
-            self.chord_handle.put(
-                Key(kv.key),
-                Value(kv.value)
-            ).await.map_err(|e| Status::internal(e.to_string()))?;
+            storage.insert(Key(kv.key), Value(kv.value));
         }
         
         Ok(Response::new(ReplicateResponse {
             success: true,
             error: String::new(),
         }))
+    }
+
+    async fn handoff(
+        &self,
+        request: Request<Streaming<HandoffRequest>>,
+    ) -> Result<Response<HandoffResponse>, Status> {
+        let mut stream = request.into_inner();
+        let mut storage = self.config.storage.lock()
+            .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
+        let mut count = 0;
+
+        // Process the stream of key-value pairs
+        while let Some(req) = stream.next().await {
+            let req = req.map_err(|e| Status::internal(format!("Failed to receive data: {}", e)))?;
+            
+            // Store each key-value pair
+            storage.insert(Key(req.key), Value(req.value));
+            count += 1;
+        }
+
+        Ok(Response::new(HandoffResponse {
+            success: true,
+            transferred_count: count,
+            error: String::new(),
+        }))
+    }
+
+    // Helper method to stream data to successor during shutdown
+    pub async fn transfer_data_to_successor(&self, successor_addr: String) -> Result<(), Status> {
+        // Create gRPC client for successor
+        let mut client = ChordGrpcClient::new(successor_addr)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to connect to successor: {}", e)))?;
+
+        // Create channel for streaming
+        let (tx, rx) = mpsc::channel(32);
+        let storage = self.config.storage.lock()
+            .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
+
+        // Spawn task to send data
+        let storage_clone = storage.clone();
+        tokio::spawn(async move {
+            for (key, value) in storage_clone.iter() {
+                let _ = tx.send(HandoffRequest {
+                    key: key.0.clone(),
+                    value: value.0.clone(),
+                }).await;
+            }
+        });
+
+        // Create stream from receiver
+        let stream = ReceiverStream::new(rx);
+
+        // Send stream to successor
+        client.handoff(stream)
+            .await
+            .map_err(|e| Status::internal(format!("Failed to transfer data: {}", e)))?;
+
+        Ok(())
     }
 }

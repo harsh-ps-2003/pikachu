@@ -17,7 +17,7 @@ use std::time::Duration;
 use tokio::select;
 use crate::chord::{
     routing::{ChordRoutingBehaviour, ChordRoutingEvent},
-    types::{NodeId, KEY_SIZE, Key, Value},
+    types::{NodeId, ChordNode, KEY_SIZE, Key, Value},
     CHORD_PROTOCOL,
 };
 use crate::network::grpc::{client::ChordGrpcClient, server::ChordGrpcServer};
@@ -51,6 +51,7 @@ pub struct ChordPeer {
     chord_handle: ChordHandle,
     swarm: libp2p::Swarm<PeerBehaviour>,
     discovered_peers: HashMap<NodeId, Multiaddr>,
+    chord_node: ChordNode,
 }
 
 impl ChordPeer {
@@ -65,7 +66,7 @@ impl ChordPeer {
             .with_tokio()
             .with_tcp(
                 tcp::Config::default(),
-                (tls::Config::new, noise::Config::new),
+                noise::Config::new(&local_key).map_err(|e| NetworkError::Transport(e.to_string()))?,
                 yamux::Config::default,
             )
             .map_err(|e| NetworkError::Transport(format!("Failed to create TCP transport: {}", e)))?
@@ -86,11 +87,15 @@ impl ChordPeer {
         swarm.listen_on(format!("/ip4/0.0.0.0/tcp/{}", port).parse()
             .map_err(|e| NetworkError::Transport(format!("Invalid multiaddr: {}", e)))?)?;
 
+        // Initialize ChordNode
+        let local_addr = format!("http://127.0.0.1:{}", port);
+        let chord_node = ChordNode::new(node_id, local_addr.clone()).await;
+
         // Create ChordHandle and actor
         let (chord_handle, chord_actor) = ChordHandle::new(
             node_id,
             port,
-            format!("http://127.0.0.1:{}", port),
+            local_addr,
         );
 
         // Spawn actor
@@ -102,7 +107,30 @@ impl ChordPeer {
             chord_handle,
             swarm,
             discovered_peers: HashMap::new(),
+            chord_node,
         })
+    }
+
+    pub async fn join(&mut self, bootstrap_addr: Multiaddr) -> Result<(), NetworkError> {
+        // Extract gRPC address from bootstrap multiaddr
+        let bootstrap_port = get_port_from_multiaddr(&bootstrap_addr)?;
+        let bootstrap_grpc = format!("http://127.0.0.1:{}", bootstrap_port);
+
+        // Join the Chord network
+        self.chord_node.join_network(Some(bootstrap_grpc))
+            .await
+            .map_err(NetworkError::Chord)?;
+
+        // Share state with worker threads
+        let thread_config = self.chord_node.get_shared_state();
+        
+        // Spawn worker threads
+        tokio::spawn(run_stabilize_worker(thread_config.clone()));
+        tokio::spawn(run_predecessor_checker(thread_config.clone()));
+        tokio::spawn(run_finger_maintainer(thread_config.clone()));
+        tokio::spawn(run_successor_maintainer(thread_config.clone()));
+
+        Ok(())
     }
 
     pub async fn run(&mut self) -> Result<(), NetworkError> {
