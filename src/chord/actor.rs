@@ -10,7 +10,8 @@ use std::collections::HashMap;
 use log::{debug, info, warn};
 use libp2p::multiaddr::{Protocol, Multiaddr};
 
-// Actor Messages
+/// Actor Messages
+/// Each message includes a oneshot sender, so the actor processes the message and sends the response back through the corresponding sender
 #[derive(Debug)]
 pub enum ChordMessage {
     // Node operations
@@ -62,9 +63,10 @@ pub enum ChordMessage {
     },
 }
 
-/// Responsible for handling messages related to the Chord protocol
+/// The Actor responsible for handling chord messages
 pub struct ChordActor {
     node: ChordNode,
+    // Message sent by ChordHandle to the actor
     receiver: mpsc::Receiver<ChordMessage>,
 }
 

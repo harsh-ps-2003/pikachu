@@ -1,6 +1,6 @@
 # Pikachu 
 
-A single-dimensional asynchronous Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
+A multi-dimensional asynchronous Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
 
 ### System Design
 

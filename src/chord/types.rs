@@ -2,12 +2,13 @@ use sha2::{Sha256, Digest};
 use std::fmt;
 use std::collections::HashMap;
 use crate::error::ChordError;
-use libp2p::{PeerId, Multiaddr, multiaddr::Protocol};
 use std::sync::{Arc, Mutex};
+use rand::RngCore;
+use crate::network::grpc::{ChordGrpcClient, NodeInfo, GetRequest};
 
 /*
 While the NodeId is used for routing and determining data responsibility in the ring, 
-the PeerId is still essential for working with network layer.
+we use direct gRPC communication with address:port for network communication
 */
 
 pub type SharedFingerTable = Arc<Mutex<FingerTable>>;
@@ -47,18 +48,7 @@ impl NodeId {
         NodeId(id)
     }
 
-    // Create NodeId from PeerId to get the Node's position in chord ring
-    pub fn from_peer_id(peer_id: &PeerId) -> Self {
-        let mut hasher = Sha256::new();
-        hasher.update(peer_id.to_bytes());
-        let result = hasher.finalize();
-        let mut id = [0u8; 32];
-        id.copy_from_slice(&result);
-        NodeId(id)
-    }
-
     /// Returns the distance between the nodes
-    /// Both PeerID and key will be in same identifier space (NodeID) and the NodeIDs are compared to find distance between them in the Chord ring, and find the correct positioning of keys in the ring
     pub fn distance(&self, other: &NodeId) -> NodeId {
         let mut result = [0u8; 32];
         for i in 0..32 {
@@ -72,16 +62,11 @@ impl NodeId {
         self.0
     }
 
-    /// Return NodeID corresponding to byte arrayß
+    /// Return NodeID corresponding to byte array
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut id = [0u8; 32];
         id.copy_from_slice(bytes);
         NodeId(id)
-    }
-
-    // Helper to convert back to PeerId if needed
-    pub fn to_peer_id(&self) -> Option<PeerId> {
-        PeerId::from_bytes(&self.0).ok()
     }
 
     // Add this method to handle modular arithmetic in the ID space
@@ -139,11 +124,13 @@ impl NodeId {
         
         NodeId(result)
     }
-}
 
-impl From<PeerId> for NodeId {
-    fn from(peer_id: PeerId) -> Self {
-        Self::from_peer_id(&peer_id)
+    /// Generate a random NodeId in the hash space
+    pub fn random() -> Self {
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+        NodeId(bytes)
     }
 }
 
@@ -151,7 +138,7 @@ impl From<PeerId> for NodeId {
 pub struct FingerEntry {
     pub start: NodeId,      // Start of the finger interval
     pub interval_end: NodeId, // End of the finger interval
-    pub node: Option<PeerId>, // Node that succeeds start
+    pub node: Option<NodeId>, // Node that succeeds start
 }
 
 #[derive(Debug)]
@@ -185,21 +172,20 @@ impl FingerTable {
         }
     }
 
-    pub fn update_finger(&mut self, index: usize, node: PeerId) {
+    pub fn update_finger(&mut self, index: usize, node: NodeId) {
         if index < self.entries.len() {
             self.entries[index].node = Some(node);
         }
     }
 
-    pub fn get_successor(&self) -> Option<PeerId> {
+    pub fn get_successor(&self) -> Option<NodeId> {
         self.entries.first().and_then(|entry| entry.node)
     }
 
-    pub fn find_closest_preceding_node(&self, id: &NodeId) -> Option<PeerId> {
+    pub fn find_closest_preceding_node(&self, id: &NodeId) -> Option<NodeId> {
         for entry in self.entries.iter().rev() {
             if let Some(node) = entry.node {
-                let node_id = NodeId::from_peer_id(&node);
-                if node_id.is_between(&self.node_id, id) {
+                if node.is_between(&self.node_id, id) {
                     return Some(node);
                 }
             }
@@ -248,8 +234,8 @@ pub struct ChordNode {
     pub predecessor: SharedPredecessor,
     pub successor_list: SharedSuccessorList,
     
-    // Address management
-    pub node_addresses: Arc<Mutex<HashMap<NodeId, Multiaddr>>>,
+    // Address management - maps NodeId to gRPC address (host:port)
+    pub node_addresses: Arc<Mutex<HashMap<NodeId, String>>>,
 }
 
 impl ChordNode {
@@ -296,7 +282,7 @@ impl ChordNode {
             // Create new network
             let mut finger_table = self.finger_table.lock().unwrap();
             for i in 0..KEY_SIZE {
-                finger_table.update_finger(i, self.node_id.to_peer_id().unwrap());
+                finger_table.update_finger(i, self.node_id);
             }
             drop(finger_table);
 
@@ -314,7 +300,7 @@ impl ChordNode {
         // Set immediate successor
         {
             let mut finger_table = self.finger_table.lock().unwrap();
-            finger_table.update_finger(0, successor_id.to_peer_id().unwrap());
+            finger_table.update_finger(0, successor_id);
         }
 
         // Initialize successor list
@@ -335,7 +321,7 @@ impl ChordNode {
             // If finger_id is between us and our successor, use successor
             if finger_id.is_between(&self.node_id, &successor_id) {
                 let mut finger_table = self.finger_table.lock().unwrap();
-                finger_table.update_finger(i, successor_id.to_peer_id().unwrap());
+                finger_table.update_finger(i, successor_id);
             } else {
                 // Otherwise, find the appropriate node
                 let finger_info = successor_client.find_successor(finger_id.to_bytes().to_vec())
@@ -343,7 +329,7 @@ impl ChordNode {
                     .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
                 
                 let mut finger_table = self.finger_table.lock().unwrap();
-                finger_table.update_finger(i, NodeId::from_bytes(&finger_info.id).to_peer_id().unwrap());
+                finger_table.update_finger(i, NodeId::from_bytes(&finger_info.id));
             }
         }
 
@@ -390,12 +376,13 @@ impl ChordNode {
         )
     }
 
-    // Add methods from ChordState
-    pub fn get_multiaddr(&self, node_id: &NodeId) -> Option<Multiaddr> {
+    // Get the gRPC address for a node
+    pub fn get_node_address(&self, node_id: &NodeId) -> Option<String> {
         self.node_addresses.lock().unwrap().get(node_id).cloned()
     }
 
-    pub fn add_known_node(&mut self, node_id: NodeId, addr: Multiaddr) {
+    // Add a known node's address
+    pub fn add_known_node(&mut self, node_id: NodeId, addr: String) {
         self.node_addresses.lock().unwrap().insert(node_id, addr);
         
         // Update finger table if needed
@@ -403,33 +390,13 @@ impl ChordNode {
         for i in 0..KEY_SIZE {
             let finger_id = self.node_id.get_finger_id(i);
             if finger_id.is_between(&self.node_id, &node_id) {
-                finger_table.update_finger(i, node_id.to_peer_id().unwrap());
+                finger_table.update_finger(i, node_id);
             }
         }
     }
 
     pub fn get_successor(&self) -> Option<NodeId> {
         self.successor_list.lock().unwrap().first().cloned()
-    }
-
-    pub fn to_grpc_addr(&self, addr: &Multiaddr) -> Result<String, ChordError> {
-        let mut host = String::new();
-        let mut port = None;
-
-        for protocol in addr.iter() {
-            match protocol {
-                Protocol::Ip4(ip) => host = ip.to_string(),
-                Protocol::Ip6(ip) => host = format!("[{}]", ip),
-                Protocol::Tcp(p) => port = Some(p),
-                _ => continue,
-            }
-        }
-
-        if let Some(port) = port {
-            Ok(format!("{}:{}", host, port))
-        } else {
-            Err(ChordError::InvalidRequest("Missing port in address".into()))
-        }
     }
 
     /// Check if this node owns the given key
@@ -455,11 +422,10 @@ impl ChordNode {
         
         // Check finger table entries from highest to lowest
         for i in (0..KEY_SIZE).rev() {
-            if let Some(finger) = finger_table.entries[i].node {
-                let finger_id = NodeId::from_peer_id(&finger);
+            if let Some(node) = finger_table.entries[i].node {
                 // Check if finger is between us and the target key
-                if finger_id.is_between(&self.node_id, &key_id) {
-                    return Some(finger_id);
+                if node.is_between(&self.node_id, &key_id) {
+                    return Some(node);
                 }
             }
         }
@@ -490,10 +456,9 @@ impl ChordNode {
         };
 
         // Forward the lookup to the next hop
-        let addr = self.get_multiaddr(&next_hop)
+        let grpc_addr = self.get_node_address(&next_hop)
             .ok_or_else(|| ChordError::NodeNotFound(format!("No address for node {}", next_hop)))?;
         
-        let grpc_addr = self.to_grpc_addr(&addr)?;
         let mut client = ChordGrpcClient::new(grpc_addr)
             .await
             .map_err(|e| ChordError::OperationFailed(format!("Failed to connect: {}", e)))?;
