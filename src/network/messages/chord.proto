@@ -18,8 +18,13 @@ service ChordNode {
     // Health check
     rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
     
-    // Data replication
+    // Data replication and transfer
     rpc Replicate (ReplicateRequest) returns (ReplicateResponse);
+    rpc TransferKeys (TransferKeysRequest) returns (TransferKeysResponse);
+    
+    // Efficient streaming handoff for large datasets
+    rpc Handoff (stream KeyValue) returns (HandoffResponse);
+    rpc RequestHandoff (HandoffRequest) returns (stream KeyValue);
 }
 
 message NodeInfo {
@@ -140,4 +145,30 @@ message ReplicateRequest {
 message ReplicateResponse {
     bool success = 1;
     string error = 2;
+}
+
+message TransferKeysRequest {
+    bytes target_id = 1;  // ID of the node that should receive the keys
+    NodeInfo requesting_node = 2;  // Node requesting the transfer
+    repeated KeyValue keys = 3;     // Keys to transfer (if any)
+    bool is_join = 4;              // Whether this is a join operation
+    bool is_leave = 5;             // Whether this is a leave operation
+}
+
+message TransferKeysResponse {
+    bool success = 1;
+    repeated KeyValue transferred_data = 2;
+    string error = 3;
+}
+
+// New streaming transfer message for efficient handoff
+message HandoffRequest {
+    NodeInfo source_node = 1;  // Node initiating the handoff
+    bool is_shutdown = 2;      // Whether this is due to node shutdown
+}
+
+message HandoffResponse {
+    bool success = 1;
+    uint32 keys_transferred = 2;
+    string error = 3;
 }

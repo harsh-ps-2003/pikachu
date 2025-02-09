@@ -13,77 +13,61 @@ const MAX_HEARTBEAT_RETRIES: u32 = 3;
 const SUCCESSOR_LIST_SIZE: usize = 3;
 
 pub async fn run_stabilize_worker(config: ThreadConfig) {
-    info!("Starting stabilization worker");
+    info!("Starting stabilize worker");
     let mut next_stabilize = tokio::time::Instant::now();
 
     loop {
-        // Wait until next stabilization interval
+        // Wait until next stabilize interval
         let now = tokio::time::Instant::now();
         if now < next_stabilize {
             sleep(next_stabilize - now).await;
             next_stabilize += STABILIZE_INTERVAL;
         }
 
-        debug!("Running stabilization protocol");
-        
+        debug!("Running stabilize");
+
         // Get current successor
-        let successor_list = match config.successor_list.lock() {
-            Ok(list) => list,
-            Err(e) => {
-                error!("Failed to acquire successor list lock: {}", e);
-                continue;
-            }
+        let successor = {
+            let successor_list = config.successor_list.lock().await;
+            successor_list.first().cloned()
         };
 
-        let successor = match successor_list.first().cloned() {
-            Some(s) => s,
-            None => {
-                debug!("No successor found during stabilization");
-                continue;
-            }
-        };
-        drop(successor_list); // Release lock early
-
-        // Create gRPC client for successor
-        let successor_addr = match config.node_addresses.lock() {
-            Ok(addresses) => match addresses.get(&successor) {
-                Some(addr) => addr.clone(),
+        if let Some(successor) = successor {
+            // Get successor's address
+            let successor_addr = match config.get_node_addr(&successor) {
+                Some(addr) => addr,
                 None => {
-                    error!("No address found for successor");
+                    error!("No address found for successor {}", successor);
                     continue;
                 }
-            },
-            Err(e) => {
-                error!("Failed to acquire node addresses lock: {}", e);
-                continue;
-            }
-        };
+            };
 
-        // Connect to successor and get their predecessor
-        match ChordGrpcClient::new(successor_addr.to_string()).await {
-            Ok(mut client) => {
-                match client.get_predecessor().await {
-                    Ok(pred_info) => {
-                        if let Some(x) = pred_info.predecessor {
-                            let x_id = NodeId::from_bytes(&x.node_id);
-                            
-                            // Update successor if needed
-                            let mut successor_list = config.successor_list.lock().unwrap();
-                            if x_id != successor {
-                                successor_list.insert(0, x_id);
-                                debug!("Updated successor to {}", x_id);
+            // Connect to successor and get their predecessor
+            match ChordGrpcClient::new(successor_addr.to_string()).await {
+                Ok(mut client) => {
+                    match client.get_predecessor().await {
+                        Ok(pred_info) => {
+                            if let Some(x) = pred_info.predecessor {
+                                let x_id = NodeId::from_bytes(&x.node_id);
+                                
+                                // Update successor if needed
+                                let mut successor_list = config.successor_list.lock().await;
+                                if x_id != successor {
+                                    successor_list.insert(0, x_id);
+                                    debug!("Updated successor to {}", x_id);
+                                }
                             }
                         }
+                        Err(e) => error!("Failed to get predecessor from successor: {}", e),
                     }
-                    Err(e) => error!("Failed to get predecessor from successor: {}", e),
-                }
 
-                // Notify successor about us
-                if let Err(e) = client.notify(config.local_node_id).await {
-                    error!("Failed to notify successor: {}", e);
+                    // Notify successor about us
+                    if let Err(e) = client.notify(config.local_node_id).await {
+                        error!("Failed to notify successor: {}", e);
+                    }
                 }
+                Err(e) => error!("Failed to connect to successor: {}", e),
             }
-            Err(e) => error!("Failed to connect to successor: {}", e),
         }
     }
 }
@@ -105,13 +89,8 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
 
         // Get current predecessor
         let predecessor = {
-            let guard = config.predecessor.lock()
-                .map_err(|e| error!("Failed to acquire predecessor lock: {}", e));
-            
-            match guard {
-                Ok(guard) => guard.clone(),
-                Err(_) => continue,
-            }
+            let guard = config.predecessor.lock().await;
+            guard.clone()
         };
 
         // If we have a predecessor, check its health
@@ -124,7 +103,7 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
                 Some(addr) => addr,
                 None => {
                     warn!("No address found for predecessor {}, marking as failed", pred_id);
-                    clear_predecessor(&config);
+                    clear_predecessor(&config).await;
                     continue;
                 }
             };
@@ -155,14 +134,14 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
                 
                 retry_count += 1;
                 if retry_count < MAX_HEARTBEAT_RETRIES {
-                    sleep(Duration::from_millis(500)).await; // Short delay between retries
+                    sleep(Duration::from_millis(500)).await;
                 }
             }
 
             // If all retries failed, clear predecessor
             if !is_alive {
                 warn!("Predecessor {} failed all heartbeat attempts, marking as failed", pred_id);
-                clear_predecessor(&config);
+                clear_predecessor(&config).await;
                 
                 // Trigger immediate stabilization to find new predecessor
                 if let Err(e) = trigger_stabilization(&config).await {
@@ -174,8 +153,8 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
 }
 
 /// Helper function to safely clear the predecessor
-fn clear_predecessor(config: &ThreadConfig) {
-    if let Ok(mut guard) = config.predecessor.lock() {
+async fn clear_predecessor(config: &ThreadConfig) {
+    if let Ok(mut guard) = config.predecessor.lock().await {
         *guard = None;
     }
 }
@@ -268,7 +247,7 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
                         let mut new_successors = vec![immediate_successor];
                         
                         // Add successors from our successor's list until we reach SUCCESSOR_LIST_SIZE
-                        for successor in successor_list.successors {
+                        for successor in successor_list {
                             let successor_id = NodeId::from_bytes(&successor.node_id);
                             
                             // Don't add duplicates or ourselves
@@ -277,11 +256,7 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
                                 new_successors.push(successor_id);
                                 
                                 // Store the address for this successor
-                                if let Some(addr_str) = successor.address {
-                                    if let Ok(addr) = addr_str.parse() {
-                                        config.add_node_addr(successor_id, addr);
-                                    }
-                                }
+                                config.add_node_addr(successor_id, successor.address);
                                 
                                 if new_successors.len() >= SUCCESSOR_LIST_SIZE {
                                     break;

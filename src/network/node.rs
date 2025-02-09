@@ -8,6 +8,7 @@ use std::time::Duration;
 use tokio::select;
 use crate::chord::{
     types::{NodeId, ChordNode, KEY_SIZE, Key, Value},
+    workers::{run_stabilize_worker, run_predecessor_checker, run_finger_maintainer, run_successor_maintainer},
 };
 use crate::network::grpc::{client::ChordGrpcClient, server::ChordGrpcServer};
 use crate::network::messages::chord::{PutRequest, GetRequest, NodeInfo};
@@ -31,13 +32,13 @@ impl ChordPeer {
         let chord_node = ChordNode::new(node_id, local_addr.clone()).await;
 
         // Create ChordHandle and actor
-        let (chord_handle, chord_actor) = ChordHandle::new(
+        let (chord_handle, mut chord_actor) = ChordHandle::new(
             node_id,
             port,
             local_addr,
-        );
+        ).await;
 
-        // Spawn actor
+        // Spawn actor with proper Send bounds
         tokio::spawn(async move {
             chord_actor.run().await;
         });

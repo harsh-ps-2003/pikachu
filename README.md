@@ -12,12 +12,9 @@ ChordGrpcServer: Handles RPC requests for lookups
 ChordRoutingBehaviour: Manages routing table and successor/predecessor relationships
 ChordActor: Handles message passing and coordination
 
-PeerId is provided by libp2p and is used at the networking layer for peer discovery, connection establishment, and secure communication. When you run a node, libp2p generates a unique PeerId for that instance. NodeId is derived from the PeerId and is used for the overlay routing in the Chord DHT. The Chord protocol uses NodeIds to determine the position of each node within the ring and to decide which node is responsible for a particular key. Every node runs its own gRPC server which is bound to an address such as "http://127.0.0.1:{port}". This server is the entry point for application-level (DHT) requests.
+The Chord protocol uses NodeIds to determine the position of each node within the ring and to decide which node is responsible for a particular key. Every node runs its own gRPC server which is bound to an address such as "http://127.0.0.1:{port}". This server is the entry point for application-level (DHT) requests.
 
-The mapping from NodeId → gRPC address is essential because while the Chord protocol works with NodeIds to locate the correct node in the DHT (via finger tables and routing logic), it doesn't by itself specify how to reach that node over the network. In our local terminal setup, each node gets a unique gRPC server port. When a node needs to forward a Put/Get or key-transfer request, it looks up the responsible node's NodeId in its locally maintained mapping to obtain the correct gRPC address. Then it uses that address to create a gRPC client and forward the request. mDNS is used for automatic peer discovery on the local network. When a node discovers another node via mDNS, it learns the peer's libp2p identity (its PeerId) and any advertised network endpoints.
-
-Since the NodeId is derived from the PeerId, you can compute the NodeId from the discovered PeerId. At the same time, the advertised network address (or the gRPC port from a multiaddr) is used to build the mapping: NodeId → gRPC address.
-This lets each node maintain an up-to-date address mapping so that routing (e.g., contacting a successor or transferring keys) can be done over gRPC.
+The mapping from NodeId → gRPC address is essential because while the Chord protocol works with NodeIds to locate the correct node in the DHT (via finger tables and routing logic), it doesn't by itself specify how to reach that node over the network. In our local terminal setup, each node gets a unique gRPC server port. When a node needs to forward a Put/Get or key-transfer request, it looks up the responsible node's NodeId in its locally maintained mapping to obtain the correct gRPC address. Then it uses that address to create a gRPC client and forward the request. 
 
 In summary:
 1. The Chord protocol routes operations (lookup, Put, Get, key transfer) based on NodeIds
@@ -38,16 +35,13 @@ Similarly, on receiving a replicate request, it iterates over the key-value pair
 gRPC Client on Every Node
 What it does:
 In addition to running a server, each node can initiate its own gRPC clients to communicate with other nodes. When a node determines that it is not responsible for a given key or needs to forward a DHT operation (like key transfer, Put/Get, etc.), it creates a gRPC client (using, for example, the ChordGrpcClient from src/network/grpc/client.rs).
-Role in DHT:
-The client connects to the other node's gRPC server using the network address obtained previously (via mDNS or from an address mapping like NodeId → gRPC address). This enables a node to forward requests over a secure and structured RPC mechanism.
-Combination in p2p:
-Every node is both an echo-server and a caller—ready to handle incoming requests on its server port and, when needed, capable of making outgoing calls to peers. This dual role supports effective p2p communication where nodes directly exchange DHT protocol messages.
+
 ---
 How gRPC Fits in the p2p Communication Flow
 1. Peer Discovery
-Nodes use mDNS for local discovery. When a node learns of a new peer (by its libp2p PeerId), it also extracts the advertised gRPC address (port on localhost).
+Nodes use mDNS for local discovery. When a node learns of a new peer (by its libp2p NodeId), it also extracts the advertised gRPC address (port on localhost).
 Building the Overlay
-The discovered PeerId is transformed into a NodeId, which is used in constructing the overlay (i.e., creating the Chord ring, filling finger tables, etc.).
+The discovered NodeId is transformed into a NodeId, which is used in constructing the overlay (i.e., creating the Chord ring, filling finger tables, etc.).
 Simultaneously, each node stores a mapping from its NodeId to its gRPC address. This mapping makes it possible to look up the correct connection endpoint when needing to forward a message.
 3. Operations & Request Forwarding
 Example (Lookup/Put/Get):
@@ -206,6 +200,14 @@ Handles both connection and heartbeat failures
 Clears predecessor reference when node is unreachable
 Triggers immediate stabilization to repair the ring
 Logs all failure events for debugging
+
+Channel Ownership: We now create two separate channels:
+One for processing received data (tx, rx)
+Another for the handoff operation (handoff_tx, handoff_rx)
+MutexGuard Handling: We now acquire the storage lock once at the beginning of the processing task, rather than for each key-value pair.
+Task Management: We store the spawned task handle in process_task and await its completion before returning.
+
+gRPC handoff -> rx_grpc -> forward_task -> tx_process -> rx_process -> storage
 
 1. Recursive Lookup
 How It Works

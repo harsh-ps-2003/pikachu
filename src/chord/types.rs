@@ -2,21 +2,22 @@ use sha2::{Sha256, Digest};
 use std::fmt;
 use std::collections::HashMap;
 use crate::error::ChordError;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use rand::RngCore;
-use crate::network::grpc::{ChordGrpcClient, NodeInfo, GetRequest};
+use crate::network::grpc::ChordGrpcClient;
+use crate::network::messages::chord::{GetRequest, NodeInfo, KeyValue, TransferKeysRequest, TransferKeysResponse, HandoffRequest, HandoffResponse};
 
 /*
 While the NodeId is used for routing and determining data responsibility in the ring, 
 we use direct gRPC communication with address:port for network communication
 */
 
-pub type SharedFingerTable = Arc<Mutex<FingerTable>>;
-
 // Shared state types for thread-safe access
 pub type SharedStorage = Arc<Mutex<HashMap<Key, Value>>>;
 pub type SharedPredecessor = Arc<Mutex<Option<NodeId>>>;
 pub type SharedSuccessorList = Arc<Mutex<Vec<NodeId>>>;
+pub type SharedFingerTable = Arc<Mutex<FingerTable>>;
 
 // Number of bits in the key space (using SHA-256)
 pub const KEY_SIZE: usize = 256;
@@ -57,12 +58,12 @@ impl NodeId {
         NodeId(result)
     }
 
-    /// Return the byte array corresponding to the NodeID
+    /// Return the byte array corresponding to the NodeId
     pub fn to_bytes(&self) -> [u8; 32] {
         self.0
     }
 
-    /// Return NodeID corresponding to byte array
+    /// Return NodeId corresponding to byte array
     pub fn from_bytes(bytes: &[u8]) -> Self {
         let mut id = [0u8; 32];
         id.copy_from_slice(bytes);
@@ -198,31 +199,48 @@ impl FingerTable {
 #[derive(Clone)]
 pub struct ThreadConfig {
     pub local_addr: String,
+    pub local_node_id: NodeId,
     pub finger_table: SharedFingerTable,
     pub storage: SharedStorage,
     pub predecessor: SharedPredecessor,
     pub successor_list: SharedSuccessorList,
+    pub node_addresses: Arc<Mutex<HashMap<NodeId, String>>>,
 }
 
 impl ThreadConfig {
     pub fn new(
         local_addr: String,
+        local_node_id: NodeId,
         finger_table: SharedFingerTable,
         storage: SharedStorage,
         predecessor: SharedPredecessor,
         successor_list: SharedSuccessorList,
+        node_addresses: Arc<Mutex<HashMap<NodeId, String>>>,
     ) -> Self {
         Self {
             local_addr,
+            local_node_id,
             finger_table,
             storage,
             predecessor,
             successor_list,
+            node_addresses,
+        }
+    }
+
+    pub fn get_node_addr(&self, node_id: &NodeId) -> Option<String> {
+        self.node_addresses.lock().ok()?.get(node_id).cloned()
+    }
+
+    pub fn add_node_addr(&self, node_id: NodeId, addr: String) {
+        if let Ok(mut addresses) = self.node_addresses.lock() {
+            addresses.insert(node_id, addr);
         }
     }
 }
 
 /// ChordNode manages the initialization and state of a Chord node
+#[derive(Debug, Clone)]
 pub struct ChordNode {
     // Core node identity
     pub node_id: NodeId,
@@ -294,8 +312,8 @@ impl ChordNode {
     }
 
     async fn init_finger_table(&mut self, successor_info: NodeInfo) -> Result<(), ChordError> {
-        let successor_id = NodeId::from_bytes(&successor_info.id);
-        let successor_addr = successor_info.addr;
+        let successor_id = NodeId::from_bytes(&successor_info.node_id);
+        let successor_addr = successor_info.address;
 
         // Set immediate successor
         {
@@ -329,13 +347,14 @@ impl ChordNode {
                     .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
                 
                 let mut finger_table = self.finger_table.lock().unwrap();
-                finger_table.update_finger(i, NodeId::from_bytes(&finger_info.id));
+                finger_table.update_finger(i, NodeId::from_bytes(&finger_info.node_id));
             }
         }
 
         Ok(())
     }
 
+    /// Transfer keys from successor when joining the network
     async fn transfer_keys_from_successor(&mut self) -> Result<(), ChordError> {
         let successor_id = {
             let finger_table = self.finger_table.lock().unwrap();
@@ -343,36 +362,48 @@ impl ChordNode {
                 .ok_or_else(|| ChordError::JoinFailed("No successor found".into()))?
         };
 
-        let successor_addr = format!("http://127.0.0.1:{}", successor_id); // You'll need proper address mapping
-        let mut successor_client = ChordGrpcClient::new(successor_addr)
+        let successor_addr = self.get_node_address(&successor_id)
+            .ok_or_else(|| ChordError::NodeNotFound(format!("No address for successor {}", successor_id)))?;
+
+        let mut client = ChordGrpcClient::new(successor_addr)
             .await
             .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
 
-        // Get keys that should belong to us
-        let mut stream = successor_client.transfer_keys(self.node_id.to_bytes().to_vec())
-            .await
-            .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
+        // Create a channel for receiving data from successor
+        let (tx, mut rx) = tokio::sync::mpsc::channel::<KeyValue>(32);
+        client.set_handoff_channel(tx);
 
-        // Store received keys
-        while let Some(key_value) = stream.next().await {
-            let key_value = key_value.map_err(|e| ChordError::JoinFailed(e.to_string()))?;
-            let mut storage = self.storage.lock().unwrap();
-            storage.insert(
-                Key(key_value.key),
-                Value(key_value.value),
-            );
+        // Start the handoff request in a separate task
+        let handoff_task = tokio::spawn(async move {
+            client.request_handoff()
+                .await
+                .map_err(|e| ChordError::JoinFailed(format!("Handoff failed: {}", e)))
+        });
+
+        // Process received key-value pairs
+        let storage = self.storage.clone();
+        while let Some(kv) = rx.recv().await {
+            let mut storage = storage.lock().unwrap();
+            storage.insert(Key(kv.key), Value(kv.value));
         }
 
-        Ok(())
+        // Wait for handoff task to complete
+        match handoff_task.await {
+            Ok(Ok(_)) => Ok(()),
+            Ok(Err(e)) => Err(e),
+            Err(e) => Err(ChordError::JoinFailed(format!("Handoff task failed: {}", e)))
+        }
     }
 
     pub fn get_shared_state(&self) -> ThreadConfig {
         ThreadConfig::new(
             self.local_addr.clone(),
+            self.node_id,
             self.finger_table.clone(),
             self.storage.clone(),
             self.predecessor.clone(),
             self.successor_list.clone(),
+            self.node_addresses.clone(),
         )
     }
 
@@ -464,7 +495,7 @@ impl ChordNode {
             .map_err(|e| ChordError::OperationFailed(format!("Failed to connect: {}", e)))?;
 
         // Make the recursive lookup call
-        let response = client.get(GetRequest {
+        let result = client.get(GetRequest {
             key: key.to_vec(),
             requesting_node: Some(NodeInfo {
                 node_id: self.node_id.to_bytes().to_vec(),
@@ -474,11 +505,129 @@ impl ChordNode {
         .await
         .map_err(|e| ChordError::OperationFailed(format!("Lookup failed: {}", e)))?;
 
-        if response.success {
-            Ok(Some(Value(response.value)))
-        } else {
-            Ok(None)
+        Ok(result)
+    }
+
+    /// Perform a streaming handoff of all data to the successor node during shutdown
+    pub async fn handoff_data(&self) -> Result<(), ChordError> {
+        let successor_id = {
+            let successor_list = self.successor_list.lock().unwrap();
+            successor_list.first().cloned()
+                .ok_or_else(|| ChordError::OperationFailed("No successor found".into()))?
+        };
+
+        let successor_addr = self.get_node_address(&successor_id)
+            .ok_or_else(|| ChordError::NodeNotFound(format!("No address for successor {}", successor_id)))?;
+
+        // Create gRPC client for successor
+        let mut client = ChordGrpcClient::new(successor_addr)
+            .await
+            .map_err(|e| ChordError::OperationFailed(format!("Failed to connect to successor: {}", e)))?;
+
+        // Create a channel for streaming data
+        let (tx, rx) = tokio::sync::mpsc::channel::<KeyValue>(32); // Buffer size of 32 for flow control
+
+        // Spawn a task to stream data from storage
+        let storage = self.storage.clone();
+        tokio::spawn(async move {
+            // Get all key-value pairs while holding the lock
+            let key_value_pairs = {
+                let storage = storage.lock().unwrap();
+                storage.iter()
+                    .map(|(key, value)| KeyValue {
+                        key: key.0.clone(),
+                        value: value.0.clone(),
+                    })
+                    .collect::<Vec<_>>()
+            }; // MutexGuard is dropped here
+
+            // Stream the collected pairs
+            for kv in key_value_pairs {
+                if tx.send(kv).await.is_err() {
+                    break; // Receiver dropped, stop sending
+                }
+            }
+        });
+
+        // Stream the data to successor using client streaming
+        let response = client.handoff(rx)
+            .await
+            .map_err(|e| ChordError::OperationFailed(format!("Handoff failed: {}", e)))?;
+
+        if !response.success {
+            return Err(ChordError::OperationFailed(
+                format!("Handoff failed: {}", response.error)
+            ));
         }
+
+        // Clear our storage after successful handoff
+        let mut storage = self.storage.lock().unwrap();
+        storage.clear();
+
+        Ok(())
+    }
+
+    /// Transfer keys to target node (used for both join and leave scenarios)
+    pub async fn transfer_keys(&self, target_id: NodeId, target_addr: String, is_leaving: bool) -> Result<(), ChordError> {
+        let mut client = ChordGrpcClient::new(target_addr)
+            .await
+            .map_err(|e| ChordError::OperationFailed(format!("Failed to connect: {}", e)))?;
+
+        // Create a channel for streaming data
+        let (tx, rx) = tokio::sync::mpsc::channel::<KeyValue>(32);
+
+        // Spawn a task to stream keys that should be transferred
+        let storage = self.storage.clone();
+        let node_id = self.node_id;
+        tokio::spawn(async move {
+            // Get all key-value pairs that need to be transferred while holding the lock
+            let key_value_pairs = {
+                let storage = storage.lock().unwrap();
+                storage.iter()
+                    .filter_map(|(key, value)| {
+                        let key_id = NodeId::from_key(&key.0);
+                        if key_id.is_between(&node_id, &target_id) || is_leaving {
+                            Some(KeyValue {
+                                key: key.0.clone(),
+                                value: value.0.clone(),
+                            })
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Vec<_>>()
+            }; // MutexGuard is dropped here
+
+            // Stream the collected pairs
+            for kv in key_value_pairs {
+                if tx.send(kv).await.is_err() {
+                    break; // Receiver dropped, stop sending
+                }
+            }
+        });
+
+        // Stream the data to target node
+        let response = client.handoff(rx)
+            .await
+            .map_err(|e| ChordError::OperationFailed(format!("Handoff failed: {}", e)))?;
+
+        if !response.success {
+            return Err(ChordError::OperationFailed(response.error));
+        }
+
+        // If we're leaving or the transfer was successful, remove transferred keys
+        if is_leaving {
+            let mut storage = self.storage.lock().unwrap();
+            storage.clear();
+        } else {
+            let mut storage = self.storage.lock().unwrap();
+            storage.retain(|key, _| {
+                let key_id = NodeId::from_key(&key.0);
+                !key_id.is_between(&self.node_id, &target_id)
+            });
+        }
+
+        Ok(())
     }
 }
 

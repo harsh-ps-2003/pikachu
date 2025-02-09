@@ -1,41 +1,28 @@
 use crate::chord::types::{NodeId, FingerTable, SharedFingerTable, KEY_SIZE, Key, Value};
 use crate::chord::CHORD_PROTOCOL;
 use crate::error::ConnectionDeniedError;
-use libp2p::{
-    swarm::{
-        NetworkBehaviour,
-        ConnectionHandler,
-        ConnectionId,
-        FromSwarm,
-        ToSwarm,
-        THandler,
-        THandlerInEvent,
-        THandlerOutEvent,
-        ConnectionDenied,
-        PortUse,
-    },
-    PeerId,
-    Multiaddr,
-    core::Endpoint,
-};
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use tokio::sync::Mutex;
 use std::task::{Context, Poll};
 use std::collections::VecDeque;
+
+// Type alias for connection tracking
+type ConnectionId = String;
 
 #[derive(Debug)]
 pub enum ChordRoutingEvent {
     // Routing table updates
-    SuccessorUpdated(PeerId),
-    PredecessorUpdated(PeerId),
-    FingerUpdated(usize, PeerId),
+    SuccessorUpdated(NodeId),
+    PredecessorUpdated(NodeId),
+    FingerUpdated(usize, NodeId),
     
     // Connection events
-    ConnectionEstablished(PeerId),
-    ConnectionClosed(PeerId),
+    ConnectionEstablished(NodeId),
+    ConnectionClosed(NodeId),
     
     // Routing events
-    RouteFound(NodeId, PeerId),
+    RouteFound(NodeId, NodeId),
     RoutingError(NodeId, String),
     
     // Storage events
@@ -48,7 +35,7 @@ pub enum ChordRoutingEvent {
 pub enum ChordRoutingAction {
     FindSuccessor(NodeId),
     UpdateFinger(usize, NodeId),
-    Notify(PeerId),
+    Notify(NodeId),
     StoreKey(Key, Value),
     RetrieveKey(Key),
 }
@@ -59,13 +46,13 @@ pub struct ChordRoutingBehaviour {
     
     // Routing table 
     finger_table: SharedFingerTable,
-    predecessor: Option<PeerId>,
+    predecessor: Option<NodeId>,
     
     // Storage
     storage: Arc<Mutex<HashMap<Key, Value>>>,
     
     // Connection tracking
-    connected_peers: HashMap<PeerId, Vec<ConnectionId>>,
+    connected_peers: HashMap<NodeId, Vec<ConnectionId>>,
     
     // Event queue
     events: VecDeque<ChordRoutingEvent>,
@@ -87,20 +74,20 @@ impl ChordRoutingBehaviour {
         }
     }
 
-    pub fn get_successor(&self) -> Option<PeerId> {
-        self.finger_table.lock().unwrap().get_successor()
+    pub async fn get_successor(&self) -> Option<NodeId> {
+        self.finger_table.lock().await.get_successor()
     }
 
-    pub fn get_predecessor(&self) -> Option<PeerId> {
+    pub async fn get_predecessor(&self) -> Option<NodeId> {
         self.predecessor
     }
 
-    pub fn set_successor(&mut self, peer: PeerId) {
-        self.finger_table.lock().unwrap().update_finger(0, peer);
+    pub async fn set_successor(&mut self, peer: NodeId) {
+        self.finger_table.lock().await.update_finger(0, peer);
         self.events.push_back(ChordRoutingEvent::SuccessorUpdated(peer));
     }
 
-    pub fn set_predecessor(&mut self, peer: PeerId) {
+    pub fn set_predecessor(&mut self, peer: NodeId) {
         self.predecessor = Some(peer);
         self.events.push_back(ChordRoutingEvent::PredecessorUpdated(peer));
         
@@ -110,13 +97,13 @@ impl ChordRoutingBehaviour {
 
     fn transfer_keys_if_needed(&mut self) {
         if let Some(pred) = self.predecessor {
-            let pred_id = NodeId::from_peer_id(&pred);
+            let pred_id = pred;  // NodeId is already the correct type
             let mut keys_to_transfer = Vec::new();
             
             // Check which keys belong to our predecessor
             let storage = self.storage.lock().unwrap();
             for (key, value) in storage.iter() {
-                let key_id = NodeId::from_bytes(&key.0);
+                let key_id = NodeId::from_key(&key.0);
                 if key_id.is_between(&pred_id, &self.local_node_id) {
                     keys_to_transfer.push((key.clone(), value.clone()));
                 }
@@ -131,12 +118,11 @@ impl ChordRoutingBehaviour {
     }
 
     pub fn store_key(&mut self, key: Key, value: Value) {
-        let key_id = NodeId::from_bytes(&key.0);
+        let key_id = NodeId::from_key(&key.0);
         
         // Check if we're responsible for this key
         if let Some(successor) = self.get_successor() {
-            let successor_id = NodeId::from_peer_id(&successor);
-            if key_id.is_between(&self.local_node_id, &successor_id) {
+            if key_id.is_between(&self.local_node_id, &successor) {
                 // We're responsible for this key
                 self.storage.lock().unwrap().insert(key.clone(), value);
                 self.events.push_back(ChordRoutingEvent::KeyStored(key));
@@ -148,19 +134,22 @@ impl ChordRoutingBehaviour {
     }
 
     pub fn retrieve_key(&mut self, key: Key) {
-        let key_id = NodeId::from_bytes(&key.0);
+        let key_id = NodeId::from_key(&key.0);
         
         // Check if we have the key
-        let storage = self.storage.lock().unwrap();
-        match storage.get(&key) {
+        let value_opt = {
+            let storage = self.storage.lock().unwrap();
+            storage.get(&key).cloned()
+        };
+
+        match value_opt {
             Some(value) => {
-                self.events.push_back(ChordRoutingEvent::KeyRetrieved(key, value.clone()));
+                self.events.push_back(ChordRoutingEvent::KeyRetrieved(key, value));
             }
             None => {
                 // If we don't have the key, check if we should have it
                 if let Some(successor) = self.get_successor() {
-                    let successor_id = NodeId::from_peer_id(&successor);
-                    if key_id.is_between(&self.local_node_id, &successor_id) {
+                    if key_id.is_between(&self.local_node_id, &successor) {
                         // We should have had it but don't
                         self.events.push_back(ChordRoutingEvent::KeyNotFound(key));
                     } else {
@@ -172,7 +161,7 @@ impl ChordRoutingBehaviour {
         }
     }
 
-    pub fn update_finger(&mut self, index: usize, peer: PeerId) {
+    pub fn update_finger(&mut self, index: usize, peer: NodeId) {
         if index < KEY_SIZE {
             self.finger_table.lock().unwrap().update_finger(index, peer);
             self.events.push_back(ChordRoutingEvent::FingerUpdated(index, peer));
@@ -198,18 +187,16 @@ impl ChordRoutingBehaviour {
         }
     }
 
-    pub fn handle_peer_discovered(&mut self, peer: PeerId) {
-        let peer_id = NodeId::from_peer_id(&peer);
-        
+    pub fn handle_peer_discovered(&mut self, peer: NodeId) {
         // If we don't have a successor yet, or if this peer should be our successor
-        if self.get_successor().is_none() || peer_id.is_between(&self.local_node_id, &NodeId::from_peer_id(&self.get_successor().unwrap())) {
+        if self.get_successor().is_none() || peer.is_between(&self.local_node_id, &self.get_successor().unwrap()) {
             self.set_successor(peer);
         }
         
         // Update finger table if this peer fits in any interval
         let table = self.finger_table.lock().unwrap();
         for (i, entry) in table.entries.iter().enumerate() {
-            if peer_id.is_between(&entry.start, &entry.interval_end) {
+            if peer.is_between(&entry.start, &entry.interval_end) {
                 drop(table); // Release the lock before calling update_finger
                 self.update_finger(i, peer);
                 break;
@@ -217,7 +204,7 @@ impl ChordRoutingBehaviour {
         }
     }
 
-    pub fn handle_peer_expired(&mut self, peer: &PeerId) {
+    pub fn handle_peer_expired(&mut self, peer: &NodeId) {
         // Remove from connected peers
         self.connected_peers.remove(peer);
         
@@ -247,60 +234,4 @@ impl ChordRoutingBehaviour {
         }
     }
 }
-
-impl NetworkBehaviour for ChordRoutingBehaviour {
-    type ConnectionHandler = libp2p::swarm::dummy::ConnectionHandler;
-    type ToSwarm = ChordRoutingEvent;
-
-    fn handle_established_inbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        peer: PeerId,
-        local_addr: &Multiaddr,
-        remote_addr: &Multiaddr,
-    ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.connected_peers.entry(peer)
-            .or_default()
-            .push(connection_id);
-        self.events.push_back(ChordRoutingEvent::ConnectionEstablished(peer));
-        Ok(libp2p::swarm::dummy::ConnectionHandler)
-    }
-
-    fn handle_established_outbound_connection(
-        &mut self,
-        connection_id: ConnectionId,
-        peer: PeerId,
-        addr: &Multiaddr,
-        role_override: Endpoint,
-        port_use: PortUse,
-    ) -> Result<THandler<Self>, ConnectionDenied> {
-        self.connected_peers.entry(peer)
-            .or_default()
-            .push(connection_id);
-        self.events.push_back(ChordRoutingEvent::ConnectionEstablished(peer));
-        Ok(libp2p::swarm::dummy::ConnectionHandler)
-    }
-
-    fn on_swarm_event(&mut self, event: FromSwarm) {
-        // Handle swarm events if needed
-    }
-
-    fn on_connection_handler_event(
-        &mut self,
-        _peer_id: PeerId,
-        _connection_id: ConnectionId,
-        _event: libp2p::swarm::THandlerOutEvent<Self>,
-    ) {
-        // Handle connection events
-    }
-
-    fn poll(
-        &mut self,
-        _cx: &mut Context<'_>,
-    ) -> Poll<ToSwarm<Self::ToSwarm, THandlerInEvent<Self>>> {
-        if let Some(event) = self.events.pop_front() {
-            return Poll::Ready(ToSwarm::GenerateEvent(event));
-        }
-        Poll::Pending
-    }
-} 
+ 

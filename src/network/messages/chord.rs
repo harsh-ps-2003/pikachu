@@ -169,6 +169,52 @@ pub struct ReplicateResponse {
     #[prost(string, tag = "2")]
     pub error: ::prost::alloc::string::String,
 }
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TransferKeysRequest {
+    /// ID of the node that should receive the keys
+    #[prost(bytes = "vec", tag = "1")]
+    pub target_id: ::prost::alloc::vec::Vec<u8>,
+    /// Node requesting the transfer
+    #[prost(message, optional, tag = "2")]
+    pub requesting_node: ::core::option::Option<NodeInfo>,
+    /// Keys to transfer (if any)
+    #[prost(message, repeated, tag = "3")]
+    pub keys: ::prost::alloc::vec::Vec<KeyValue>,
+    /// Whether this is a join operation
+    #[prost(bool, tag = "4")]
+    pub is_join: bool,
+    /// Whether this is a leave operation
+    #[prost(bool, tag = "5")]
+    pub is_leave: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct TransferKeysResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(message, repeated, tag = "2")]
+    pub transferred_data: ::prost::alloc::vec::Vec<KeyValue>,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
+/// New streaming transfer message for efficient handoff
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HandoffRequest {
+    /// Node initiating the handoff
+    #[prost(message, optional, tag = "1")]
+    pub source_node: ::core::option::Option<NodeInfo>,
+    /// Whether this is due to node shutdown
+    #[prost(bool, tag = "2")]
+    pub is_shutdown: bool,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct HandoffResponse {
+    #[prost(bool, tag = "1")]
+    pub success: bool,
+    #[prost(uint32, tag = "2")]
+    pub keys_transferred: u32,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
 /// Generated client implementations.
 pub mod chord_node_client {
     #![allow(
@@ -447,7 +493,7 @@ pub mod chord_node_client {
             req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Heartbeat"));
             self.inner.unary(req, path, codec).await
         }
-        /// Data replication
+        /// Data replication and transfer
         pub async fn replicate(
             &mut self,
             request: impl tonic::IntoRequest<super::ReplicateRequest>,
@@ -470,6 +516,76 @@ pub mod chord_node_client {
             let mut req = request.into_request();
             req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Replicate"));
             self.inner.unary(req, path, codec).await
+        }
+        pub async fn transfer_keys(
+            &mut self,
+            request: impl tonic::IntoRequest<super::TransferKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TransferKeysResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/chord.ChordNode/TransferKeys",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "TransferKeys"));
+            self.inner.unary(req, path, codec).await
+        }
+        /// Efficient streaming handoff for large datasets
+        pub async fn handoff(
+            &mut self,
+            request: impl tonic::IntoStreamingRequest<Message = super::KeyValue>,
+        ) -> std::result::Result<
+            tonic::Response<super::HandoffResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Handoff");
+            let mut req = request.into_streaming_request();
+            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Handoff"));
+            self.inner.client_streaming(req, path, codec).await
+        }
+        pub async fn request_handoff(
+            &mut self,
+            request: impl tonic::IntoRequest<super::HandoffRequest>,
+        ) -> std::result::Result<
+            tonic::Response<tonic::codec::Streaming<super::KeyValue>>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/chord.ChordNode/RequestHandoff",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "RequestHandoff"));
+            self.inner.server_streaming(req, path, codec).await
         }
     }
 }
@@ -537,12 +653,37 @@ pub mod chord_node_server {
             tonic::Response<super::HeartbeatResponse>,
             tonic::Status,
         >;
-        /// Data replication
+        /// Data replication and transfer
         async fn replicate(
             &self,
             request: tonic::Request<super::ReplicateRequest>,
         ) -> std::result::Result<
             tonic::Response<super::ReplicateResponse>,
+            tonic::Status,
+        >;
+        async fn transfer_keys(
+            &self,
+            request: tonic::Request<super::TransferKeysRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::TransferKeysResponse>,
+            tonic::Status,
+        >;
+        /// Efficient streaming handoff for large datasets
+        async fn handoff(
+            &self,
+            request: tonic::Request<tonic::Streaming<super::KeyValue>>,
+        ) -> std::result::Result<tonic::Response<super::HandoffResponse>, tonic::Status>;
+        /// Server streaming response type for the RequestHandoff method.
+        type RequestHandoffStream: tonic::codegen::tokio_stream::Stream<
+                Item = std::result::Result<super::KeyValue, tonic::Status>,
+            >
+            + std::marker::Send
+            + 'static;
+        async fn request_handoff(
+            &self,
+            request: tonic::Request<super::HandoffRequest>,
+        ) -> std::result::Result<
+            tonic::Response<Self::RequestHandoffStream>,
             tonic::Status,
         >;
     }
@@ -1058,6 +1199,142 @@ pub mod chord_node_server {
                                 max_encoding_message_size,
                             );
                         let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/chord.ChordNode/TransferKeys" => {
+                    #[allow(non_camel_case_types)]
+                    struct TransferKeysSvc<T: ChordNode>(pub Arc<T>);
+                    impl<
+                        T: ChordNode,
+                    > tonic::server::UnaryService<super::TransferKeysRequest>
+                    for TransferKeysSvc<T> {
+                        type Response = super::TransferKeysResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::TransferKeysRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ChordNode>::transfer_keys(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = TransferKeysSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/chord.ChordNode/Handoff" => {
+                    #[allow(non_camel_case_types)]
+                    struct HandoffSvc<T: ChordNode>(pub Arc<T>);
+                    impl<
+                        T: ChordNode,
+                    > tonic::server::ClientStreamingService<super::KeyValue>
+                    for HandoffSvc<T> {
+                        type Response = super::HandoffResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<tonic::Streaming<super::KeyValue>>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ChordNode>::handoff(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = HandoffSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.client_streaming(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/chord.ChordNode/RequestHandoff" => {
+                    #[allow(non_camel_case_types)]
+                    struct RequestHandoffSvc<T: ChordNode>(pub Arc<T>);
+                    impl<
+                        T: ChordNode,
+                    > tonic::server::ServerStreamingService<super::HandoffRequest>
+                    for RequestHandoffSvc<T> {
+                        type Response = super::KeyValue;
+                        type ResponseStream = T::RequestHandoffStream;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::ResponseStream>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::HandoffRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ChordNode>::request_handoff(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = RequestHandoffSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.server_streaming(method, req).await;
                         Ok(res)
                     };
                     Box::pin(fut)

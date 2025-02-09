@@ -34,6 +34,12 @@ pub enum NetworkError {
 
     #[error("Connection denied: {0}")]
     ConnectionDenied(#[from] ConnectionDeniedError),
+
+    #[error("Peer unreachable: {0}")]
+    PeerUnreachable(String),
+
+    #[error("Invalid request: {0}")]
+    InvalidRequest(String),
 }
 
 #[derive(Error, Debug)]

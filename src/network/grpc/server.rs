@@ -16,15 +16,15 @@ use crate::network::messages::chord::{
     GetPredecessorRequest, GetPredecessorResponse,
     HeartbeatRequest, HeartbeatResponse,
     ReplicateRequest, ReplicateResponse,
-    HandoffRequest, HandoffResponse,
+    TransferKeysRequest, TransferKeysResponse,
     NodeInfo, KeyValue,
+    HandoffRequest, HandoffResponse,
 };
 use chrono::Utc;
-use tokio_stream::wrappers::ReceiverStream;
 use tokio::sync::mpsc;
 use log::{debug, error};
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct ChordGrpcServer {
     node: Arc<ChordNode>,
     config: ThreadConfig,
@@ -284,62 +284,126 @@ impl ChordNodeService for ChordGrpcServer {
         }))
     }
 
-    async fn handoff(
+    async fn transfer_keys(
         &self,
-        request: Request<Streaming<HandoffRequest>>,
-    ) -> Result<Response<HandoffResponse>, Status> {
-        let mut stream = request.into_inner();
+        request: Request<TransferKeysRequest>,
+    ) -> Result<Response<TransferKeysResponse>, Status> {
+        let req = request.into_inner();
+        let target_id = NodeId::from_bytes(&req.target_id)
+            .map_err(|_| Status::invalid_argument("Invalid target ID"))?;
+
+        // Lock storage to handle key transfers
         let mut storage = self.config.storage.lock()
             .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
-        let mut count = 0;
+        
+        let mut transferred_data = Vec::new();
 
-        // Process the stream of key-value pairs
-        while let Some(req) = stream.next().await {
-            let req = req.map_err(|e| Status::internal(format!("Failed to receive data: {}", e)))?;
-            
-            // Store each key-value pair
-            storage.insert(Key(req.key), Value(req.value));
-            count += 1;
+        // Handle incoming keys if any (for join/leave operations)
+        if !req.keys.is_empty() {
+            for kv in req.keys {
+                storage.insert(Key(kv.key), Value(kv.value));
+                transferred_data.push(kv);
+            }
+            debug!("Stored {} transferred keys", transferred_data.len());
         }
 
-        Ok(Response::new(HandoffResponse {
+        // If this is a join operation, find keys that should be transferred to the new node
+        if req.is_join {
+            let mut keys_to_transfer = Vec::new();
+            for (key, value) in storage.iter() {
+                let key_id = NodeId::from_key(&key.0);
+                if self.node.owns_key(&key.0) && key_id.is_between(&self.node.node_id, &target_id) {
+                    keys_to_transfer.push(KeyValue {
+                        key: key.0.clone(),
+                        value: value.0.clone(),
+                    });
+                    storage.remove(key);
+                }
+            }
+            transferred_data.extend(keys_to_transfer);
+            debug!("Transferring {} keys to joining node", transferred_data.len());
+        }
+
+        // If this is a leave operation, accept all keys from the leaving node
+        if req.is_leave {
+            debug!("Accepting {} keys from leaving node", req.keys.len());
+        }
+
+        Ok(Response::new(TransferKeysResponse {
             success: true,
-            transferred_count: count,
+            transferred_data,
             error: String::new(),
         }))
     }
 
-    // Helper method to stream data to successor during shutdown
-    pub async fn transfer_data_to_successor(&self, successor_addr: String) -> Result<(), Status> {
-        // Create gRPC client for successor
-        let mut client = ChordGrpcClient::new(successor_addr)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to connect to successor: {}", e)))?;
+    async fn handoff(
+        &self,
+        request: Request<Streaming<KeyValue>>,
+    ) -> Result<Response<HandoffResponse>, Status> {
+        let mut stream = request.into_inner();
+        let mut keys_transferred = 0;
+        let storage = self.node.storage.clone();
 
-        // Create channel for streaming
+        // Process incoming key-value pairs
+        while let Some(kv) = stream.next().await {
+            match kv {
+                Ok(kv) => {
+                    let mut storage = storage.lock()
+                        .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
+                    storage.insert(Key(kv.key), Value(kv.value));
+                    keys_transferred += 1;
+                }
+                Err(e) => {
+                    return Ok(Response::new(HandoffResponse {
+                        success: false,
+                        keys_transferred: keys_transferred as u32,
+                        error: format!("Stream error: {}", e),
+                    }));
+                }
+            }
+        }
+
+        Ok(Response::new(HandoffResponse {
+            success: true,
+            keys_transferred: keys_transferred as u32,
+            error: String::new(),
+        }))
+    }
+
+    type RequestHandoffStream = Pin<Box<dyn Stream<Item = Result<KeyValue, Status>> + Send>>;
+
+    async fn request_handoff(
+        &self,
+        request: Request<HandoffRequest>,
+    ) -> Result<Response<Self::RequestHandoffStream>, Status> {
+        let req = request.into_inner();
         let (tx, rx) = mpsc::channel(32);
-        let storage = self.config.storage.lock()
-            .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
-
-        // Spawn task to send data
-        let storage_clone = storage.clone();
+        
+        // Clone necessary data for the async task
+        let storage = self.node.storage.clone();
+        
+        // Spawn a task to stream the data
         tokio::spawn(async move {
-            for (key, value) in storage_clone.iter() {
-                let _ = tx.send(HandoffRequest {
+            let storage = storage.lock()
+                .map_err(|_| Status::internal("Failed to acquire storage lock"))?;
+            
+            // Stream all key-value pairs
+            for (key, value) in storage.iter() {
+                let kv = KeyValue {
                     key: key.0.clone(),
                     value: value.0.clone(),
-                }).await;
+                };
+                
+                if tx.send(Ok(kv)).await.is_err() {
+                    break; // Client disconnected
+                }
             }
+            
+            Ok::<_, Status>(())
         });
-
-        // Create stream from receiver
-        let stream = ReceiverStream::new(rx);
-
-        // Send stream to successor
-        client.handoff(stream)
-            .await
-            .map_err(|e| Status::internal(format!("Failed to transfer data: {}", e)))?;
-
-        Ok(())
+        
+        // Convert the channel receiver into a stream
+        let output_stream = tokio_stream::wrappers::ReceiverStream::new(rx);
+        Ok(Response::new(Box::pin(output_stream) as Self::RequestHandoffStream))
     }
 }
