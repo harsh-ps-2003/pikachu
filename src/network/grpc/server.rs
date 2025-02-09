@@ -25,6 +25,7 @@ use crate::network::messages::chord::{
 use chrono::Utc;
 use tokio::sync::mpsc;
 use log::{debug, error};
+use crate::network::grpc::client::ChordGrpcClient;
 
 #[derive(Debug, Clone)]
 pub struct ChordGrpcServer {
@@ -147,6 +148,27 @@ impl ChordNodeService for ChordGrpcServer {
         if successor_list.is_empty() || node_id.is_between(&self.node.node_id, &successor_list[0]) {
             successor_list.insert(0, node_id);
             *predecessor = Some(node_id);
+            
+            // Update node addresses
+            let mut addresses = self.config.node_addresses.lock().await;
+            addresses.insert(node_id, joining_node.address.clone());
+            
+            // Trigger immediate stabilization
+            drop(successor_list); // Release lock before stabilization
+            drop(predecessor);
+            drop(addresses);
+            
+            if let Some(addr) = self.node.get_node_address(&node_id).await {
+                if let Ok(mut client) = ChordGrpcClient::new(addr).await {
+                    if let Err(e) = client.stabilize().await {
+                        error!("Failed to stabilize with joining node: {}", e);
+                    }
+                }
+            }
+            
+            // Reacquire locks for response
+            successor_list = self.config.successor_list.lock().await;
+            predecessor = self.config.predecessor.lock().await;
         }
         
         let successor_addr = self.config.get_node_addr(&successor_list[0]).await

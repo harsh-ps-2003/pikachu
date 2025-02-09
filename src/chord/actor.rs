@@ -8,7 +8,8 @@ use crate::{
 use crate::network::messages::chord::{GetRequest, PutRequest, NodeInfo, KeyValue, ReplicateRequest};
 use crate::network::grpc::client::ChordGrpcClient;
 use std::collections::HashMap;
-use log::{debug, info, warn};
+use log::{debug, info, warn, error};
+use std::time::Duration;
 
 /// Actor Messages
 /// Each message includes a oneshot sender, so the actor processes the message and sends the response back through the corresponding sender
@@ -397,41 +398,259 @@ impl ChordActor {
     }
 
     async fn handle_node_departure(&mut self, node: NodeId) {
-        // Remove from node addresses
-        self.node.node_addresses.lock().await.remove(&node);
-
-        // Update successor list
+        debug!("Handling departure of node {}", node);
+        
+        // Remove from node addresses with proper cleanup
         {
-            let mut successor_list = self.node.successor_list.lock().await;
-            if let Some(first) = successor_list.first().cloned() {
-                if first == node {
-                    // Remove failed successor
-                    successor_list.remove(0);
-                    // Add next successor if available
-                    if let Some(next) = successor_list.first().cloned() {
-                        successor_list.insert(0, next);
-                    }
-                }
-            }
-            // Remove from successor list
-            successor_list.retain(|&x| x != node);
+            let mut addresses = self.node.node_addresses.lock().await;
+            addresses.remove(&node);
         }
 
-        // Update predecessor if needed
+        // First check successor list state and collect necessary info
+        let (is_empty, was_immediate_successor) = {
+            let mut successor_list = self.node.successor_list.lock().await;
+            let was_immediate = successor_list.first().map_or(false, |&s| s == node);
+            
+            // Remove failed node from successor list
+            successor_list.retain(|&x| x != node);
+            
+            (successor_list.is_empty(), was_immediate)
+        };
+
+        // Handle empty successor list case
+        if is_empty {
+            error!("Successor list is empty after node departure");
+            self.trigger_emergency_stabilization().await;
+            return;
+        }
+
+        // If immediate successor failed, handle with robust retry mechanism
+        if was_immediate_successor {
+            self.handle_immediate_successor_failure(node).await;
+        }
+
+        // Update predecessor if needed with proper validation
         {
             let mut predecessor = self.node.predecessor.lock().await;
             if *predecessor == Some(node) {
+                debug!("Clearing failed predecessor {}", node);
                 *predecessor = None;
+                drop(predecessor); // Explicitly drop the lock before calling find_new_predecessor
+                self.find_new_predecessor().await;
             }
         }
 
-        // Clean finger table
-        {
-            let mut finger_table = self.node.finger_table.lock().await;
-            for i in 0..FINGER_TABLE_SIZE {
-                if finger_table.entries[i].node == Some(node) {
-                    finger_table.entries[i].node = None;
+        // Clean finger table with validation
+        self.clean_finger_table(node).await;
+        
+        // Validate overall network state
+        self.validate_network_state().await;
+    }
+
+    async fn handle_immediate_successor_failure(&mut self, failed_node: NodeId) {
+        debug!("Handling immediate successor {} failure", failed_node);
+        
+        let mut retry_count = 0;
+        let max_retries = 3;
+        let mut backoff_duration = Duration::from_millis(100);
+        
+        while retry_count < max_retries {
+            let stabilization_result = {
+                let successor_list = self.node.successor_list.lock().await;
+                if let Some(&next_successor) = successor_list.first() {
+                    // Update finger table's immediate successor
+                    let mut finger_table = self.node.finger_table.lock().await;
+                    finger_table.update_finger(0, next_successor);
+                    drop(finger_table);
+                    
+                    // Attempt stabilization with exponential backoff
+                    if let Some(next_addr) = self.node.get_node_address(&next_successor).await {
+                        debug!("Attempting stabilization with next successor {} (attempt {})", 
+                               next_successor, retry_count + 1);
+                        
+                        match ChordGrpcClient::new(next_addr).await {
+                            Ok(mut client) => {
+                                match client.stabilize().await {
+                                    Ok(_) => {
+                                        debug!("Successfully stabilized with new successor {}", next_successor);
+                                        true
+                                    }
+                                    Err(e) => {
+                                        error!("Failed to stabilize with new successor (attempt {}): {}", 
+                                               retry_count + 1, e);
+                                        false
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                error!("Failed to connect to new successor (attempt {}): {}", 
+                                       retry_count + 1, e);
+                                false
+                            }
+                        }
+                    } else {
+                        error!("No address found for next successor {}", next_successor);
+                        false
+                    }
+                } else {
+                    error!("No valid successor found in list");
+                    false
                 }
+            };
+
+            if stabilization_result {
+                debug!("Successfully recovered from successor failure");
+                return;
+            }
+
+            retry_count += 1;
+            if retry_count < max_retries {
+                tokio::time::sleep(backoff_duration).await;
+                backoff_duration *= 2; // Exponential backoff
+            }
+        }
+
+        error!("Failed to recover from successor failure after {} attempts", max_retries);
+        self.trigger_emergency_stabilization().await;
+    }
+
+    async fn trigger_emergency_stabilization(&mut self) {
+        debug!("Triggering emergency stabilization");
+        
+        // Attempt to rebuild successor list from finger table
+        let mut new_successors = Vec::new();
+        {
+            let finger_table = self.node.finger_table.lock().await;
+            for entry in &finger_table.entries {
+                if let Some(node) = entry.node {
+                    if !new_successors.contains(&node) {
+                        new_successors.push(node);
+                    }
+                }
+            }
+        }
+
+        if !new_successors.is_empty() {
+            let mut successor_list = self.node.successor_list.lock().await;
+            *successor_list = new_successors;
+            successor_list.truncate(SUCCESSOR_LIST_SIZE);
+            
+            // Attempt to stabilize with each potential successor
+            for &potential_successor in successor_list.iter() {
+                if let Some(addr) = self.node.get_node_address(&potential_successor).await {
+                    if let Ok(mut client) = ChordGrpcClient::new(addr).await {
+                        if client.stabilize().await.is_ok() {
+                            debug!("Emergency stabilization successful with node {}", potential_successor);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+
+        error!("Emergency stabilization failed to find any valid successors");
+    }
+
+    async fn find_new_predecessor(&mut self) {
+        debug!("Searching for new predecessor");
+        
+        // First collect potential nodes to check
+        let potential_nodes = {
+            let finger_table = self.node.finger_table.lock().await;
+            let mut nodes = Vec::new();
+            for entry in finger_table.entries.iter().rev() {
+                if let Some(node) = entry.node {
+                    nodes.push(node);
+                }
+            }
+            nodes
+        };
+
+        // Now try each node without holding the finger table lock
+        for node in potential_nodes {
+            if let Some(addr) = self.node.get_node_address(&node).await {
+                if let Ok(mut client) = ChordGrpcClient::new(addr).await {
+                    if let Ok(pred_resp) = client.get_predecessor().await {
+                        if let Some(pred_info) = pred_resp.predecessor {
+                            let pred_id = NodeId::from_bytes(&pred_info.node_id);
+                            let mut predecessor = self.node.predecessor.lock().await;
+                            *predecessor = Some(pred_id);
+                            debug!("Found new predecessor {}", pred_id);
+                            return;
+                        }
+                    }
+                }
+            }
+        }
+        
+        debug!("No suitable predecessor found");
+    }
+
+    async fn clean_finger_table(&mut self, failed_node: NodeId) {
+        debug!("Cleaning finger table entries for failed node {}", failed_node);
+        
+        let mut finger_table = self.node.finger_table.lock().await;
+        for i in 0..FINGER_TABLE_SIZE {
+            if finger_table.entries[i].node == Some(failed_node) {
+                // Try to find alternative node for this finger
+                if let Ok(new_successor) = self.find_successor(self.calculate_finger_id(i as u8)).await {
+                    finger_table.entries[i].node = Some(new_successor);
+                    debug!("Updated finger {} to new node {}", i, new_successor);
+                } else {
+                    finger_table.entries[i].node = None;
+                    debug!("Cleared finger {} as no alternative found", i);
+                }
+            }
+        }
+    }
+
+    async fn validate_network_state(&mut self) {
+        debug!("Validating network state consistency");
+        
+        // Validate successor list
+        {
+            let successor_list = self.node.successor_list.lock().await;
+            if successor_list.is_empty() {
+                error!("Invalid state: Empty successor list detected");
+                drop(successor_list);
+                self.trigger_emergency_stabilization().await;
+                return;
+            }
+            
+            // Verify immediate successor is reachable
+            if let Some(&immediate_successor) = successor_list.first() {
+                if let Some(addr) = self.node.get_node_address(&immediate_successor).await {
+                    if let Err(e) = ChordGrpcClient::new(addr).await {
+                        error!("Invalid state: Immediate successor unreachable: {}", e);
+                        drop(successor_list);
+                        self.handle_immediate_successor_failure(immediate_successor).await;
+                        return;
+                    }
+                }
+            }
+        }
+
+        // Validate finger table consistency
+        {
+            let finger_table = self.node.finger_table.lock().await;
+            let mut needs_repair = false;
+            
+            for (i, entry) in finger_table.entries.iter().enumerate() {
+                if let Some(node) = entry.node {
+                    if let Some(addr) = self.node.get_node_address(&node).await {
+                        if let Err(_) = ChordGrpcClient::new(addr).await {
+                            debug!("Invalid finger table entry {} pointing to unreachable node {}", i, node);
+                            needs_repair = true;
+                        }
+                    } else {
+                        needs_repair = true;
+                    }
+                }
+            }
+            
+            if needs_repair {
+                drop(finger_table);
+                self.fix_fingers().await.ok();
             }
         }
     }
@@ -455,27 +674,59 @@ impl ChordActor {
     async fn update_successor_list(&mut self) -> Result<(), ChordError> {
         let mut new_list = Vec::with_capacity(SUCCESSOR_LIST_SIZE);
         
-        // Start with our immediate successor
-        if let Some(mut current) = self.node.get_successor().await {
+        // Get current successor first
+        let current_successor = {
+            let successor_list = self.node.successor_list.lock().await;
+            successor_list.first().cloned()
+        };
+        
+        // Build new successor list without holding any locks
+        if let Some(mut current) = current_successor {
             new_list.push(current);
             
             // Get successors of our successor until list is full
             while new_list.len() < SUCCESSOR_LIST_SIZE {
-                if let Ok(mut client) = self.create_grpc_client(current).await {
-                    // Get successor list from current node
-                    // This would need to be implemented in the gRPC service
-                    // For now, just break
-                    break;
-                } else {
-                    // If we can't reach the current node, stop here
-                    break;
+                match self.create_grpc_client(current).await {
+                    Ok(mut client) => {
+                        match client.get_successor_list().await {
+                            Ok(successors) => {
+                                for succ_info in successors {
+                                    let succ_id = NodeId::from_bytes(&succ_info.node_id);
+                                    if !new_list.contains(&succ_id) && succ_id != self.node.node_id {
+                                        new_list.push(succ_id);
+                                        
+                                        // Update node address
+                                        let mut addresses = self.node.node_addresses.lock().await;
+                                        addresses.insert(succ_id, succ_info.address);
+                                    }
+                                    if new_list.len() >= SUCCESSOR_LIST_SIZE {
+                                        break;
+                                    }
+                                }
+                                current = new_list.last().cloned().unwrap_or(current);
+                            }
+                            Err(e) => {
+                                debug!("Failed to get successor list from {}: {}", current, e);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        debug!("Failed to connect to node {}: {}", current, e);
+                        break;
+                    }
                 }
             }
         }
         
-        // Update successor list atomically
-        let mut successor_list = self.node.successor_list.lock().await;
-        *successor_list = new_list;
+        // Only update the successor list if we found any valid successors
+        if !new_list.is_empty() {
+            let mut successor_list = self.node.successor_list.lock().await;
+            *successor_list = new_list;
+            debug!("Updated successor list with {} entries", successor_list.len());
+        } else {
+            debug!("No valid successors found to update the list");
+        }
         
         Ok(())
     }

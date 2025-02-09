@@ -266,8 +266,10 @@ Thanks to the authors of these wonderful research papers for inspiring me for th
 
 Some cool things that can be further done :
 
+* Enable TLS in gRPC communication for better security
 * Make this BFT DHT privacy-preserving as well - [Add Query Privacy to Robust DHTs](https://arxiv.org/pdf/1107.1072)
 That would be cool :)
+* Sybil attacks could poison the network as nodes can join without authentication
 
 ### Disclaimer 
 
