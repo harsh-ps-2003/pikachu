@@ -14,6 +14,8 @@ service ChordNode {
     rpc Stabilize (StabilizeRequest) returns (StabilizeResponse);
     rpc FindSuccessor (FindSuccessorRequest) returns (FindSuccessorResponse);
     rpc GetPredecessor (GetPredecessorRequest) returns (GetPredecessorResponse);
+    rpc GetSuccessorList (GetSuccessorListRequest) returns (GetSuccessorListResponse);
+    rpc FixFinger (FixFingerRequest) returns (FixFingerResponse);
     
     // Health check
     rpc Heartbeat (HeartbeatRequest) returns (HeartbeatResponse);
@@ -170,5 +172,28 @@ message HandoffRequest {
 message HandoffResponse {
     bool success = 1;
     uint32 keys_transferred = 2;
+    string error = 3;
+}
+
+// New messages for successor list management
+message GetSuccessorListRequest {
+    NodeInfo requesting_node = 1;
+}
+
+message GetSuccessorListResponse {
+    repeated NodeInfo successors = 1;
+    bool success = 2;
+    string error = 3;
+}
+
+// New messages for finger table maintenance
+message FixFingerRequest {
+    uint32 index = 1;
+    NodeInfo requesting_node = 2;
+}
+
+message FixFingerResponse {
+    NodeInfo finger_node = 1;
+    bool success = 2;
     string error = 3;
 }

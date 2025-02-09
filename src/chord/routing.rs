@@ -95,13 +95,13 @@ impl ChordRoutingBehaviour {
         self.transfer_keys_if_needed();
     }
 
-    fn transfer_keys_if_needed(&mut self) {
+    async fn transfer_keys_if_needed(&mut self) {
         if let Some(pred) = self.predecessor {
             let pred_id = pred;  // NodeId is already the correct type
             let mut keys_to_transfer = Vec::new();
             
             // Check which keys belong to our predecessor
-            let storage = self.storage.lock().unwrap();
+            let storage = self.storage.lock().await;
             for (key, value) in storage.iter() {
                 let key_id = NodeId::from_key(&key.0);
                 if key_id.is_between(&pred_id, &self.local_node_id) {
@@ -112,33 +112,34 @@ impl ChordRoutingBehaviour {
             
             // Transfer the keys
             for (key, value) in keys_to_transfer {
-                self.store_key(key, value);
+                self.store_key(key, value).await;
             }
         }
     }
 
-    pub fn store_key(&mut self, key: Key, value: Value) {
+    pub async fn store_key(&mut self, key: Key, value: Value) {
         let key_id = NodeId::from_key(&key.0);
         
         // Check if we're responsible for this key
-        if let Some(successor) = self.get_successor() {
+        if let Some(successor) = self.get_successor().await {
             if key_id.is_between(&self.local_node_id, &successor) {
                 // We're responsible for this key
-                self.storage.lock().unwrap().insert(key.clone(), value);
+                let mut storage = self.storage.lock().await;
+                storage.insert(key.clone(), value);
                 self.events.push_back(ChordRoutingEvent::KeyStored(key));
             } else {
                 // Forward to the closest preceding node
-                self.find_successor(key_id);
+                self.find_successor(key_id).await;
             }
         }
     }
 
-    pub fn retrieve_key(&mut self, key: Key) {
+    pub async fn retrieve_key(&mut self, key: Key) {
         let key_id = NodeId::from_key(&key.0);
         
         // Check if we have the key
         let value_opt = {
-            let storage = self.storage.lock().unwrap();
+            let storage = self.storage.lock().await;
             storage.get(&key).cloned()
         };
 
@@ -148,29 +149,29 @@ impl ChordRoutingBehaviour {
             }
             None => {
                 // If we don't have the key, check if we should have it
-                if let Some(successor) = self.get_successor() {
+                if let Some(successor) = self.get_successor().await {
                     if key_id.is_between(&self.local_node_id, &successor) {
                         // We should have had it but don't
                         self.events.push_back(ChordRoutingEvent::KeyNotFound(key));
                     } else {
                         // Forward to the closest preceding node
-                        self.find_successor(key_id);
+                        self.find_successor(key_id).await;
                     }
                 }
             }
         }
     }
 
-    pub fn update_finger(&mut self, index: usize, peer: NodeId) {
+    pub async fn update_finger(&mut self, index: usize, peer: NodeId) {
         if index < KEY_SIZE {
-            self.finger_table.lock().unwrap().update_finger(index, peer);
+            self.finger_table.lock().await.update_finger(index, peer);
             self.events.push_back(ChordRoutingEvent::FingerUpdated(index, peer));
         }
     }
 
-    pub fn find_successor(&mut self, id: NodeId) {
+    pub async fn find_successor(&mut self, id: NodeId) {
         let closest = {
-            let table = self.finger_table.lock().unwrap();
+            let table = self.finger_table.lock().await;
             table.find_closest_preceding_node(&id)
         };
         
@@ -187,37 +188,38 @@ impl ChordRoutingBehaviour {
         }
     }
 
-    pub fn handle_peer_discovered(&mut self, peer: NodeId) {
+    pub async fn handle_peer_discovered(&mut self, peer: NodeId) {
         // If we don't have a successor yet, or if this peer should be our successor
-        if self.get_successor().is_none() || peer.is_between(&self.local_node_id, &self.get_successor().unwrap()) {
-            self.set_successor(peer);
+        if self.get_successor().await.is_none() || 
+           peer.is_between(&self.local_node_id, &self.get_successor().await.unwrap()) {
+            self.set_successor(peer).await;
         }
         
         // Update finger table if this peer fits in any interval
-        let table = self.finger_table.lock().unwrap();
+        let table = self.finger_table.lock().await;
         for (i, entry) in table.entries.iter().enumerate() {
             if peer.is_between(&entry.start, &entry.interval_end) {
                 drop(table); // Release the lock before calling update_finger
-                self.update_finger(i, peer);
+                self.update_finger(i, peer).await;
                 break;
             }
         }
     }
 
-    pub fn handle_peer_expired(&mut self, peer: &NodeId) {
+    pub async fn handle_peer_expired(&mut self, peer: &NodeId) {
         // Remove from connected peers
         self.connected_peers.remove(peer);
         
         // If this was our successor, we need to find a new one
-        if let Some(successor) = self.get_successor() {
+        if let Some(successor) = self.get_successor().await {
             if &successor == peer {
                 // Try to find the next best successor from our finger table
-                let table = self.finger_table.lock().unwrap();
+                let table = self.finger_table.lock().await;
                 for entry in table.entries.iter() {
                     if let Some(node) = entry.node {
                         if node != successor {
                             drop(table);
-                            self.set_successor(node);
+                            self.set_successor(node).await;
                             break;
                         }
                     }
@@ -229,7 +231,7 @@ impl ChordRoutingBehaviour {
         if let Some(pred) = self.predecessor {
             if &pred == peer {
                 self.predecessor = None;
-                self.transfer_keys_if_needed();
+                self.transfer_keys_if_needed().await;
             }
         }
     }

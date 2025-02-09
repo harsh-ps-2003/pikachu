@@ -34,7 +34,7 @@ pub async fn run_stabilize_worker(config: ThreadConfig) {
 
         if let Some(successor) = successor {
             // Get successor's address
-            let successor_addr = match config.get_node_addr(&successor) {
+            let successor_addr = match config.get_node_addr(&successor).await {
                 Some(addr) => addr,
                 None => {
                     error!("No address found for successor {}", successor);
@@ -99,7 +99,7 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
             let mut is_alive = false;
 
             // Try to get predecessor's address
-            let pred_addr = match config.get_node_addr(&pred_id) {
+            let pred_addr = match config.get_node_addr(&pred_id).await {
                 Some(addr) => addr,
                 None => {
                     warn!("No address found for predecessor {}, marking as failed", pred_id);
@@ -154,9 +154,8 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
 
 /// Helper function to safely clear the predecessor
 async fn clear_predecessor(config: &ThreadConfig) {
-    if let Ok(mut guard) = config.predecessor.lock().await {
-        *guard = None;
-    }
+    let mut guard = config.predecessor.lock().await;
+    *guard = None;
 }
 
 /// Helper function to trigger immediate stabilization
@@ -212,14 +211,9 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
         debug!("Updating successor list");
 
         // Get current successor list
-        let mut current_successors = {
-            let guard = config.successor_list.lock()
-                .map_err(|e| error!("Failed to acquire successor list lock: {}", e));
-            
-            match guard {
-                Ok(guard) => guard.clone(),
-                Err(_) => continue,
-            }
+        let current_successors = {
+            let guard = config.successor_list.lock().await;
+            guard.clone()
         };
 
         // If we have no successors, we can't update the list
@@ -230,7 +224,7 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
 
         // Get immediate successor's address
         let immediate_successor = current_successors[0];
-        let successor_addr = match config.get_node_addr(&immediate_successor) {
+        let successor_addr = match config.get_node_addr(&immediate_successor).await {
             Some(addr) => addr,
             None => {
                 warn!("No address found for immediate successor {}", immediate_successor);
@@ -256,7 +250,7 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
                                 new_successors.push(successor_id);
                                 
                                 // Store the address for this successor
-                                config.add_node_addr(successor_id, successor.address);
+                                config.add_node_addr(successor_id, successor.address).await;
                                 
                                 if new_successors.len() >= SUCCESSOR_LIST_SIZE {
                                     break;
@@ -265,10 +259,9 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
                         }
 
                         // Update our successor list
-                        if let Ok(mut guard) = config.successor_list.lock() {
-                            *guard = new_successors;
-                            debug!("Updated successor list: {:?}", guard);
-                        }
+                        let mut guard = config.successor_list.lock().await;
+                        *guard = new_successors;
+                        debug!("Updated successor list: {:?}", guard);
                     }
                     Err(e) => {
                         error!("Failed to get successor list from successor: {}", e);
@@ -287,18 +280,17 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
 /// Helper function to handle successor failure
 async fn handle_successor_failure(config: &ThreadConfig, failed_successor: &NodeId) {
     // Remove failed successor from list
-    if let Ok(mut guard) = config.successor_list.lock() {
-        guard.retain(|&x| x != *failed_successor);
-        
-        // If we still have successors, try to stabilize with the next one
-        if let Some(next_successor) = guard.first().cloned() {
-            debug!("Attempting to stabilize with next successor {}", next_successor);
-            if let Err(e) = trigger_stabilization(config).await {
-                error!("Failed to stabilize with next successor: {}", e);
-            }
-        } else {
-            warn!("No more successors available after failure");
+    let mut guard = config.successor_list.lock().await;
+    guard.retain(|&x| x != *failed_successor);
+    
+    // If we still have successors, try to stabilize with the next one
+    if let Some(next_successor) = guard.first().cloned() {
+        debug!("Attempting to stabilize with next successor {}", next_successor);
+        if let Err(e) = trigger_stabilization(config).await {
+            error!("Failed to stabilize with next successor: {}", e);
         }
+    } else {
+        warn!("No more successors available after failure");
     }
 }
 
@@ -325,10 +317,9 @@ pub async fn run_fix_fingers_worker(config: ThreadConfig) {
         match find_successor(&config, finger_id).await {
             Ok(successor) => {
                 // Update finger table
-                if let Ok(mut finger_table) = config.finger_table.lock() {
-                    finger_table.update_finger(next_finger, successor);
-                    debug!("Updated finger {} to {}", next_finger, successor);
-                }
+                let mut finger_table = config.finger_table.lock().await;
+                finger_table.update_finger(next_finger, successor);
+                debug!("Updated finger {} to {}", next_finger, successor);
             }
             Err(e) => error!("Failed to find successor for finger {}: {}", next_finger, e),
         }
@@ -340,26 +331,32 @@ pub async fn run_fix_fingers_worker(config: ThreadConfig) {
 
 /// Helper function to find successor for a given ID
 async fn find_successor(config: &ThreadConfig, id: NodeId) -> Result<NodeId, ChordError> {
-    let successor_list = config.successor_list.lock()
-        .map_err(|_| ChordError::StabilizationFailed("Failed to acquire successor list lock".into()))?;
+    let successor_list = config.successor_list.lock().await;
     
     if let Some(successor) = successor_list.first() {
         if id.is_between(&config.local_node_id, successor) {
             return Ok(*successor);
         }
         
+        // Drop the successor_list lock before acquiring finger_table lock
+        drop(successor_list);
+        
         // Find closest preceding node from finger table
-        let finger_table = config.finger_table.lock()
-            .map_err(|_| ChordError::StabilizationFailed("Failed to acquire finger table lock".into()))?;
+        let finger_table = config.finger_table.lock().await;
         
         if let Some(closest) = finger_table.find_closest_preceding_node(&id) {
-            // Forward the query to the closest preceding node
-            let addr = config.node_addresses.lock().unwrap()
-                .get(&closest)
-                .ok_or_else(|| ChordError::NodeNotFound(format!("No address for node {}", closest)))?
-                .clone();
+            // Drop the finger_table lock before proceeding with network operations
+            drop(finger_table);
             
-            let mut client = ChordGrpcClient::new(addr.to_string())
+            // Forward the query to the closest preceding node
+            let addr = {
+                let node_addresses = config.node_addresses.lock().await;
+                node_addresses.get(&closest)
+                    .ok_or_else(|| ChordError::NodeNotFound(format!("No address for node {}", closest)))?
+                    .clone()
+            };
+            
+            let mut client = ChordGrpcClient::new(addr)
                 .await
                 .map_err(|e| ChordError::StabilizationFailed(format!("Failed to connect to node: {}", e)))?;
             

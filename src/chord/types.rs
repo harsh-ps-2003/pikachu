@@ -196,7 +196,7 @@ impl FingerTable {
 }
 
 // Thread configuration
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ThreadConfig {
     pub local_addr: String,
     pub local_node_id: NodeId,
@@ -228,14 +228,14 @@ impl ThreadConfig {
         }
     }
 
-    pub fn get_node_addr(&self, node_id: &NodeId) -> Option<String> {
-        self.node_addresses.lock().ok()?.get(node_id).cloned()
+    pub async fn get_node_addr(&self, node_id: &NodeId) -> Option<String> {
+        let addresses = self.node_addresses.lock().await;
+        addresses.get(node_id).cloned()
     }
 
-    pub fn add_node_addr(&self, node_id: NodeId, addr: String) {
-        if let Ok(mut addresses) = self.node_addresses.lock() {
-            addresses.insert(node_id, addr);
-        }
+    pub async fn add_node_addr(&self, node_id: NodeId, addr: String) {
+        let mut addresses = self.node_addresses.lock().await;
+        addresses.insert(node_id, addr);
     }
 }
 
@@ -298,13 +298,13 @@ impl ChordNode {
                 .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
         } else {
             // Create new network
-            let mut finger_table = self.finger_table.lock().unwrap();
+            let mut finger_table = self.finger_table.lock().await;
             for i in 0..KEY_SIZE {
                 finger_table.update_finger(i, self.node_id);
             }
             drop(finger_table);
 
-            let mut successor_list = self.successor_list.lock().unwrap();
+            let mut successor_list = self.successor_list.lock().await;
             successor_list.push(self.node_id);
         }
 
@@ -317,13 +317,13 @@ impl ChordNode {
 
         // Set immediate successor
         {
-            let mut finger_table = self.finger_table.lock().unwrap();
+            let mut finger_table = self.finger_table.lock().await;
             finger_table.update_finger(0, successor_id);
         }
 
         // Initialize successor list
         {
-            let mut successor_list = self.successor_list.lock().unwrap();
+            let mut successor_list = self.successor_list.lock().await;
             successor_list.push(successor_id);
         }
 
@@ -338,7 +338,7 @@ impl ChordNode {
             
             // If finger_id is between us and our successor, use successor
             if finger_id.is_between(&self.node_id, &successor_id) {
-                let mut finger_table = self.finger_table.lock().unwrap();
+                let mut finger_table = self.finger_table.lock().await;
                 finger_table.update_finger(i, successor_id);
             } else {
                 // Otherwise, find the appropriate node
@@ -346,7 +346,7 @@ impl ChordNode {
                     .await
                     .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
                 
-                let mut finger_table = self.finger_table.lock().unwrap();
+                let mut finger_table = self.finger_table.lock().await;
                 finger_table.update_finger(i, NodeId::from_bytes(&finger_info.node_id));
             }
         }
@@ -357,12 +357,13 @@ impl ChordNode {
     /// Transfer keys from successor when joining the network
     async fn transfer_keys_from_successor(&mut self) -> Result<(), ChordError> {
         let successor_id = {
-            let finger_table = self.finger_table.lock().unwrap();
+            let finger_table = self.finger_table.lock().await;
             finger_table.get_successor()
                 .ok_or_else(|| ChordError::JoinFailed("No successor found".into()))?
         };
 
         let successor_addr = self.get_node_address(&successor_id)
+            .await
             .ok_or_else(|| ChordError::NodeNotFound(format!("No address for successor {}", successor_id)))?;
 
         let mut client = ChordGrpcClient::new(successor_addr)
@@ -383,7 +384,7 @@ impl ChordNode {
         // Process received key-value pairs
         let storage = self.storage.clone();
         while let Some(kv) = rx.recv().await {
-            let mut storage = storage.lock().unwrap();
+            let mut storage = storage.lock().await;
             storage.insert(Key(kv.key), Value(kv.value));
         }
 
@@ -407,17 +408,19 @@ impl ChordNode {
         )
     }
 
-    // Get the gRPC address for a node
-    pub fn get_node_address(&self, node_id: &NodeId) -> Option<String> {
-        self.node_addresses.lock().unwrap().get(node_id).cloned()
+    pub async fn get_node_address(&self, node_id: &NodeId) -> Option<String> {
+        let addresses = self.node_addresses.lock().await;
+        addresses.get(node_id).cloned()
     }
 
-    // Add a known node's address
-    pub fn add_known_node(&mut self, node_id: NodeId, addr: String) {
-        self.node_addresses.lock().unwrap().insert(node_id, addr);
+    pub async fn add_known_node(&mut self, node_id: NodeId, addr: String) {
+        {
+            let mut addresses = self.node_addresses.lock().await;
+            addresses.insert(node_id, addr);
+        }
         
         // Update finger table if needed
-        let mut finger_table = self.finger_table.lock().unwrap();
+        let mut finger_table = self.finger_table.lock().await;
         for i in 0..KEY_SIZE {
             let finger_id = self.node_id.get_finger_id(i);
             if finger_id.is_between(&self.node_id, &node_id) {
@@ -426,15 +429,15 @@ impl ChordNode {
         }
     }
 
-    pub fn get_successor(&self) -> Option<NodeId> {
-        self.successor_list.lock().unwrap().first().cloned()
+    pub async fn get_successor(&self) -> Option<NodeId> {
+        let successor_list = self.successor_list.lock().await;
+        successor_list.first().cloned()
     }
 
     /// Check if this node owns the given key
-    pub fn owns_key(&self, key: &[u8]) -> bool {
+    pub async fn owns_key(&self, key: &[u8]) -> bool {
         let key_id = NodeId::from_key(key);
-        let predecessor = self.predecessor.lock()
-            .expect("Failed to acquire predecessor lock");
+        let predecessor = self.predecessor.lock().await;
         
         match *predecessor {
             Some(pred) => {
@@ -446,10 +449,9 @@ impl ChordNode {
     }
 
     /// Find the closest preceding node for a given key from our finger table
-    pub fn closest_preceding_node(&self, key: &[u8]) -> Option<NodeId> {
+    pub async fn closest_preceding_node(&self, key: &[u8]) -> Option<NodeId> {
         let key_id = NodeId::from_key(key);
-        let finger_table = self.finger_table.lock()
-            .expect("Failed to acquire finger table lock");
+        let finger_table = self.finger_table.lock().await;
         
         // Check finger table entries from highest to lowest
         for i in (0..KEY_SIZE).rev() {
@@ -466,19 +468,17 @@ impl ChordNode {
     /// Lookup a key in the DHT
     pub async fn lookup_key(&self, key: &[u8]) -> Result<Option<Value>, ChordError> {
         // First check if we own the key
-        if self.owns_key(key) {
-            let storage = self.storage.lock()
-                .expect("Failed to acquire storage lock");
+        if self.owns_key(key).await {
+            let storage = self.storage.lock().await;
             return Ok(storage.get(&Key(key.to_vec())).cloned());
         }
 
         // If we don't own it, find the closest preceding node
-        let next_hop = match self.closest_preceding_node(key) {
+        let next_hop = match self.closest_preceding_node(key).await {
             Some(node) => node,
             None => {
                 // If no closer node found, try our immediate successor
-                let successor_list = self.successor_list.lock()
-                    .expect("Failed to acquire successor list lock");
+                let successor_list = self.successor_list.lock().await;
                 match successor_list.first() {
                     Some(succ) => *succ,
                     None => return Err(ChordError::NodeNotFound("No route to key".into()))
@@ -488,6 +488,7 @@ impl ChordNode {
 
         // Forward the lookup to the next hop
         let grpc_addr = self.get_node_address(&next_hop)
+            .await
             .ok_or_else(|| ChordError::NodeNotFound(format!("No address for node {}", next_hop)))?;
         
         let mut client = ChordGrpcClient::new(grpc_addr)
@@ -511,12 +512,13 @@ impl ChordNode {
     /// Perform a streaming handoff of all data to the successor node during shutdown
     pub async fn handoff_data(&self) -> Result<(), ChordError> {
         let successor_id = {
-            let successor_list = self.successor_list.lock().unwrap();
+            let successor_list = self.successor_list.lock().await;
             successor_list.first().cloned()
                 .ok_or_else(|| ChordError::OperationFailed("No successor found".into()))?
         };
 
         let successor_addr = self.get_node_address(&successor_id)
+            .await
             .ok_or_else(|| ChordError::NodeNotFound(format!("No address for successor {}", successor_id)))?;
 
         // Create gRPC client for successor
@@ -532,7 +534,7 @@ impl ChordNode {
         tokio::spawn(async move {
             // Get all key-value pairs while holding the lock
             let key_value_pairs = {
-                let storage = storage.lock().unwrap();
+                let storage = storage.lock().await;
                 storage.iter()
                     .map(|(key, value)| KeyValue {
                         key: key.0.clone(),
@@ -561,7 +563,7 @@ impl ChordNode {
         }
 
         // Clear our storage after successful handoff
-        let mut storage = self.storage.lock().unwrap();
+        let mut storage = self.storage.lock().await;
         storage.clear();
 
         Ok(())
@@ -582,7 +584,7 @@ impl ChordNode {
         tokio::spawn(async move {
             // Get all key-value pairs that need to be transferred while holding the lock
             let key_value_pairs = {
-                let storage = storage.lock().unwrap();
+                let storage = storage.lock().await;
                 storage.iter()
                     .filter_map(|(key, value)| {
                         let key_id = NodeId::from_key(&key.0);
@@ -617,10 +619,10 @@ impl ChordNode {
 
         // If we're leaving or the transfer was successful, remove transferred keys
         if is_leaving {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.storage.lock().await;
             storage.clear();
         } else {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.storage.lock().await;
             storage.retain(|key, _| {
                 let key_id = NodeId::from_key(&key.0);
                 !key_id.is_between(&self.node_id, &target_id)
@@ -628,6 +630,44 @@ impl ChordNode {
         }
 
         Ok(())
+    }
+
+    pub async fn find_successor(&self, id: NodeId) -> Result<NodeId, ChordError> {
+        let successor_list = self.successor_list.lock().await;
+        if let Some(successor) = successor_list.first() {
+            if id.is_between(&self.node_id, successor) {
+                return Ok(*successor);
+            }
+        }
+        drop(successor_list);
+        
+        // Otherwise, forward to closest preceding node
+        if let Some(closest) = self.closest_preceding_node(&id.to_bytes()).await {
+            if closest == self.node_id {
+                // If we're the closest, return our successor
+                let successor_list = self.successor_list.lock().await;
+                return successor_list.first()
+                    .cloned()
+                    .ok_or_else(|| ChordError::NodeNotFound("No successor found".into()));
+            }
+            
+            // Forward the query to the closest preceding node
+            if let Some(addr) = self.get_node_address(&closest).await {
+                let mut client = ChordGrpcClient::new(addr)
+                    .await
+                    .map_err(|e| ChordError::OperationFailed(format!("Failed to connect: {}", e)))?;
+                
+                // Get the node info from the response
+                let node_info = client.find_successor(id.to_bytes().to_vec())
+                    .await
+                    .map_err(|e| ChordError::OperationFailed(format!("Failed to find successor: {}", e)))?;
+
+                // Convert NodeInfo to NodeId
+                return Ok(NodeId::from_bytes(&node_info.node_id));
+            }
+        }
+        
+        Err(ChordError::NodeNotFound("No suitable successor found".into()))
     }
 }
 

@@ -86,10 +86,11 @@ impl ChordPeer {
             let target = self.calculate_finger_id(i);
             // Find successor for this finger
             let successor = self.chord_node.closest_preceding_node(&target.to_bytes())
+                .await
                 .ok_or_else(|| NetworkError::Chord(ChordError::NodeNotFound("No successor found".into())))?;
             
             // Update finger table
-            let mut finger_table = self.chord_node.finger_table.lock().unwrap();
+            let mut finger_table = self.chord_node.finger_table.lock().await;
             finger_table.update_finger(i, successor);
         }
 
@@ -110,9 +111,10 @@ impl ChordPeer {
         let key_id = NodeId::from_key(&key.0);
         
         // Find the node responsible for this key
-        if let Some(target_node) = self.chord_node.closest_preceding_node(&key.0) {
+        if let Some(target_node) = self.chord_node.closest_preceding_node(&key.0).await {
             // Forward the store request to the responsible node
             let target_addr = self.chord_node.get_node_address(&target_node)
+                .await
                 .ok_or_else(|| NetworkError::Chord(ChordError::NodeNotFound("No address found".into())))?;
             
             let mut client = ChordGrpcClient::new(target_addr)
@@ -141,9 +143,10 @@ impl ChordPeer {
         let key_id = NodeId::from_key(&key.0);
         
         // Find the node responsible for this key
-        if let Some(target_node) = self.chord_node.closest_preceding_node(&key.0) {
+        if let Some(target_node) = self.chord_node.closest_preceding_node(&key.0).await {
             // Forward the retrieve request to the responsible node
             let target_addr = self.chord_node.get_node_address(&target_node)
+                .await
                 .ok_or_else(|| NetworkError::Chord(ChordError::NodeNotFound("No address found".into())))?;
             
             let mut client = ChordGrpcClient::new(target_addr)
@@ -160,10 +163,10 @@ impl ChordPeer {
             .await
             .map_err(|e| NetworkError::Grpc(format!("Failed to retrieve value: {}", e)))?;
             
-            if response.success {
-                Ok(response.value)
+            if let Some(value) = response {
+                Ok(value.0)
             } else {
-                Err(NetworkError::Chord(ChordError::KeyNotFound))
+                Err(NetworkError::Chord(ChordError::OperationFailed("Key not found".into())))
             }
         } else {
             Err(NetworkError::Chord(ChordError::NodeNotFound("No responsible node found".into())))

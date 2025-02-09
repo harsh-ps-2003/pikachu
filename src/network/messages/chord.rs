@@ -215,6 +215,38 @@ pub struct HandoffResponse {
     #[prost(string, tag = "3")]
     pub error: ::prost::alloc::string::String,
 }
+/// New messages for successor list management
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetSuccessorListRequest {
+    #[prost(message, optional, tag = "1")]
+    pub requesting_node: ::core::option::Option<NodeInfo>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct GetSuccessorListResponse {
+    #[prost(message, repeated, tag = "1")]
+    pub successors: ::prost::alloc::vec::Vec<NodeInfo>,
+    #[prost(bool, tag = "2")]
+    pub success: bool,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
+/// New messages for finger table maintenance
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FixFingerRequest {
+    #[prost(uint32, tag = "1")]
+    pub index: u32,
+    #[prost(message, optional, tag = "2")]
+    pub requesting_node: ::core::option::Option<NodeInfo>,
+}
+#[derive(Clone, PartialEq, ::prost::Message)]
+pub struct FixFingerResponse {
+    #[prost(message, optional, tag = "1")]
+    pub finger_node: ::core::option::Option<NodeInfo>,
+    #[prost(bool, tag = "2")]
+    pub success: bool,
+    #[prost(string, tag = "3")]
+    pub error: ::prost::alloc::string::String,
+}
 /// Generated client implementations.
 pub mod chord_node_client {
     #![allow(
@@ -469,6 +501,53 @@ pub mod chord_node_client {
                 .insert(GrpcMethod::new("chord.ChordNode", "GetPredecessor"));
             self.inner.unary(req, path, codec).await
         }
+        pub async fn get_successor_list(
+            &mut self,
+            request: impl tonic::IntoRequest<super::GetSuccessorListRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSuccessorListResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/chord.ChordNode/GetSuccessorList",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "GetSuccessorList"));
+            self.inner.unary(req, path, codec).await
+        }
+        pub async fn fix_finger(
+            &mut self,
+            request: impl tonic::IntoRequest<super::FixFingerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FixFingerResponse>,
+            tonic::Status,
+        > {
+            self.inner
+                .ready()
+                .await
+                .map_err(|e| {
+                    tonic::Status::unknown(
+                        format!("Service was not ready: {}", e.into()),
+                    )
+                })?;
+            let codec = tonic::codec::ProstCodec::default();
+            let path = http::uri::PathAndQuery::from_static(
+                "/chord.ChordNode/FixFinger",
+            );
+            let mut req = request.into_request();
+            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "FixFinger"));
+            self.inner.unary(req, path, codec).await
+        }
         /// Health check
         pub async fn heartbeat(
             &mut self,
@@ -643,6 +722,20 @@ pub mod chord_node_server {
             request: tonic::Request<super::GetPredecessorRequest>,
         ) -> std::result::Result<
             tonic::Response<super::GetPredecessorResponse>,
+            tonic::Status,
+        >;
+        async fn get_successor_list(
+            &self,
+            request: tonic::Request<super::GetSuccessorListRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::GetSuccessorListResponse>,
+            tonic::Status,
+        >;
+        async fn fix_finger(
+            &self,
+            request: tonic::Request<super::FixFingerRequest>,
+        ) -> std::result::Result<
+            tonic::Response<super::FixFingerResponse>,
             tonic::Status,
         >;
         /// Health check
@@ -1098,6 +1191,96 @@ pub mod chord_node_server {
                     let inner = self.inner.clone();
                     let fut = async move {
                         let method = GetPredecessorSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/chord.ChordNode/GetSuccessorList" => {
+                    #[allow(non_camel_case_types)]
+                    struct GetSuccessorListSvc<T: ChordNode>(pub Arc<T>);
+                    impl<
+                        T: ChordNode,
+                    > tonic::server::UnaryService<super::GetSuccessorListRequest>
+                    for GetSuccessorListSvc<T> {
+                        type Response = super::GetSuccessorListResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::GetSuccessorListRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ChordNode>::get_successor_list(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = GetSuccessorListSvc(inner);
+                        let codec = tonic::codec::ProstCodec::default();
+                        let mut grpc = tonic::server::Grpc::new(codec)
+                            .apply_compression_config(
+                                accept_compression_encodings,
+                                send_compression_encodings,
+                            )
+                            .apply_max_message_size_config(
+                                max_decoding_message_size,
+                                max_encoding_message_size,
+                            );
+                        let res = grpc.unary(method, req).await;
+                        Ok(res)
+                    };
+                    Box::pin(fut)
+                }
+                "/chord.ChordNode/FixFinger" => {
+                    #[allow(non_camel_case_types)]
+                    struct FixFingerSvc<T: ChordNode>(pub Arc<T>);
+                    impl<
+                        T: ChordNode,
+                    > tonic::server::UnaryService<super::FixFingerRequest>
+                    for FixFingerSvc<T> {
+                        type Response = super::FixFingerResponse;
+                        type Future = BoxFuture<
+                            tonic::Response<Self::Response>,
+                            tonic::Status,
+                        >;
+                        fn call(
+                            &mut self,
+                            request: tonic::Request<super::FixFingerRequest>,
+                        ) -> Self::Future {
+                            let inner = Arc::clone(&self.0);
+                            let fut = async move {
+                                <T as ChordNode>::fix_finger(&inner, request).await
+                            };
+                            Box::pin(fut)
+                        }
+                    }
+                    let accept_compression_encodings = self.accept_compression_encodings;
+                    let send_compression_encodings = self.send_compression_encodings;
+                    let max_decoding_message_size = self.max_decoding_message_size;
+                    let max_encoding_message_size = self.max_encoding_message_size;
+                    let inner = self.inner.clone();
+                    let fut = async move {
+                        let method = FixFingerSvc(inner);
                         let codec = tonic::codec::ProstCodec::default();
                         let mut grpc = tonic::server::Grpc::new(codec)
                             .apply_compression_config(
