@@ -1,30 +1,21 @@
-use tonic::transport::Channel;
-use futures::Stream;
-use std::pin::Pin;
-use crate::network::messages::chord::{
-    chord_node_client::ChordNodeClient,
-    JoinRequest, JoinResponse,
-    LookupRequest, LookupResponse,
-    PutRequest, PutResponse,
-    GetRequest, GetResponse,
-    NotifyRequest, NotifyResponse,
-    StabilizeRequest, StabilizeResponse,
-    FindSuccessorRequest, FindSuccessorResponse,
-    GetPredecessorRequest, GetPredecessorResponse,
-    GetSuccessorListRequest, GetSuccessorListResponse,
-    HeartbeatRequest, HeartbeatResponse,
-    ReplicateRequest, ReplicateResponse,
-    TransferKeysRequest, TransferKeysResponse,
-    HandoffRequest, HandoffResponse,
-    NodeInfo, KeyValue,
-    FixFingerRequest, FixFingerResponse,
-};
+use crate::chord::types::{Key, NodeId, Value};
 use crate::error::NetworkError;
-use crate::chord::types::{Key, Value, NodeId};
-use tokio::sync::mpsc;
+use crate::network::messages::chord::{
+    chord_node_client::ChordNodeClient, FindSuccessorRequest, FindSuccessorResponse,
+    FixFingerRequest, FixFingerResponse, GetPredecessorRequest, GetPredecessorResponse, GetRequest,
+    GetResponse, GetSuccessorListRequest, GetSuccessorListResponse, HandoffRequest,
+    HandoffResponse, HeartbeatRequest, HeartbeatResponse, JoinRequest, JoinResponse, KeyValue,
+    LookupRequest, LookupResponse, NodeInfo, NotifyRequest, NotifyResponse, PutRequest,
+    PutResponse, ReplicateRequest, ReplicateResponse, StabilizeRequest, StabilizeResponse,
+    TransferKeysRequest, TransferKeysResponse,
+};
+use futures::Stream;
 use futures::StreamExt;
-use tonic::Request;
+use std::pin::Pin;
+use tokio::sync::mpsc;
 use tokio_stream::{self as ts};
+use tonic::transport::Channel;
+use tonic::Request;
 use ts::StreamExt as _;
 
 pub struct ChordGrpcClient {
@@ -35,10 +26,11 @@ pub struct ChordGrpcClient {
 
 impl ChordGrpcClient {
     pub async fn new(addr: String) -> Result<Self, NetworkError> {
-        let client = ChordNodeClient::connect(addr.clone()).await
+        let client = ChordNodeClient::connect(addr.clone())
+            .await
             .map_err(|e| NetworkError::Grpc(format!("Failed to connect: {}", e)))?;
-        
-        Ok(Self { 
+
+        Ok(Self {
             client,
             handoff_tx: None,
             local_addr: addr,
@@ -51,7 +43,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn lookup(&mut self, key: Vec<u8>) -> Result<NodeInfo, NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .lookup(LookupRequest {
                 key,
                 requesting_node: None,
@@ -63,7 +56,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn put(&mut self, request: PutRequest) -> Result<(), NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .put(request)
             .await
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?
@@ -77,7 +71,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn get(&mut self, request: GetRequest) -> Result<Option<Value>, NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .get(request)
             .await
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?
@@ -93,7 +88,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn replicate(&mut self, request: ReplicateRequest) -> Result<(), NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .replicate(request)
             .await
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?
@@ -107,7 +103,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn find_successor(&mut self, id: Vec<u8>) -> Result<NodeInfo, NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .find_successor(FindSuccessorRequest {
                 id,
                 requesting_node: None,
@@ -117,14 +114,20 @@ impl ChordGrpcClient {
 
         let inner = response.into_inner();
         if inner.success {
-            inner.successor.ok_or_else(|| NetworkError::PeerUnreachable("No successor found".to_string()))
+            inner
+                .successor
+                .ok_or_else(|| NetworkError::PeerUnreachable("No successor found".to_string()))
         } else {
             Err(NetworkError::PeerUnreachable(inner.error))
         }
     }
 
-    pub async fn transfer_keys(&mut self, request: TransferKeysRequest) -> Result<TransferKeysResponse, NetworkError> {
-        let response = self.client
+    pub async fn transfer_keys(
+        &mut self,
+        request: TransferKeysRequest,
+    ) -> Result<TransferKeysResponse, NetworkError> {
+        let response = self
+            .client
             .transfer_keys(request)
             .await
             .map_err(|e| NetworkError::Grpc(format!("Transfer failed: {}", e)))?;
@@ -132,8 +135,13 @@ impl ChordGrpcClient {
         Ok(response.into_inner())
     }
 
-    pub async fn notify_transfer(&mut self, keys: Vec<KeyValue>, target_node: NodeInfo) -> Result<(), NetworkError> {
-        let response = self.client
+    pub async fn notify_transfer(
+        &mut self,
+        keys: Vec<KeyValue>,
+        target_node: NodeInfo,
+    ) -> Result<(), NetworkError> {
+        let response = self
+            .client
             .replicate(ReplicateRequest {
                 data: keys,
                 source_node: Some(target_node),
@@ -156,9 +164,12 @@ impl ChordGrpcClient {
     ) -> Result<HandoffResponse, NetworkError> {
         // Convert the receiver into a stream
         let stream = ts::wrappers::ReceiverStream::new(rx);
-        
-        let response = self.client
-            .handoff(Request::new(Box::pin(stream) as Pin<Box<dyn Stream<Item = KeyValue> + Send>>))
+
+        let response = self
+            .client
+            .handoff(Request::new(
+                Box::pin(stream) as Pin<Box<dyn Stream<Item = KeyValue> + Send>>
+            ))
             .await
             .map_err(|e| NetworkError::Grpc(format!("Handoff failed: {}", e)))?;
 
@@ -172,19 +183,24 @@ impl ChordGrpcClient {
             is_shutdown: false,
         };
 
-        let mut stream = self.client
+        let mut stream = self
+            .client
             .request_handoff(request)
             .await
             .map_err(|e| NetworkError::Grpc(format!("Failed to start handoff: {}", e)))?
             .into_inner();
 
         // Process the stream of key-value pairs
-        while let Some(kv) = stream.message().await
-            .map_err(|e| NetworkError::Grpc(format!("Error receiving handoff data: {}", e)))? {
+        while let Some(kv) = stream
+            .message()
+            .await
+            .map_err(|e| NetworkError::Grpc(format!("Error receiving handoff data: {}", e)))?
+        {
             // Send to the channel if available
             if let Some(tx) = &self.handoff_tx {
-                tx.send(kv).await
-                    .map_err(|_| NetworkError::Grpc("Failed to send key-value pair to channel".into()))?;
+                tx.send(kv).await.map_err(|_| {
+                    NetworkError::Grpc("Failed to send key-value pair to channel".into())
+                })?;
             }
         }
 
@@ -192,18 +208,20 @@ impl ChordGrpcClient {
     }
 
     pub async fn get_predecessor(&mut self) -> Result<GetPredecessorResponse, NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .get_predecessor(GetPredecessorRequest {
                 requesting_node: None,
             })
             .await
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?;
-        
+
         Ok(response.into_inner())
     }
 
     pub async fn notify(&mut self, node_id: NodeId) -> Result<(), NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .notify(NotifyRequest {
                 predecessor: Some(NodeInfo {
                     node_id: node_id.to_bytes().to_vec(),
@@ -222,7 +240,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn heartbeat(&mut self) -> Result<HeartbeatResponse, NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .heartbeat(HeartbeatRequest {
                 sender: None,
                 timestamp: chrono::Utc::now().timestamp() as u64,
@@ -234,7 +253,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn stabilize(&mut self) -> Result<(), NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .stabilize(StabilizeRequest {
                 requesting_node: None,
             })
@@ -257,7 +277,8 @@ impl ChordGrpcClient {
             }),
         };
 
-        let response = self.client
+        let response = self
+            .client
             .get_successor_list(request)
             .await
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?;
@@ -271,7 +292,8 @@ impl ChordGrpcClient {
     }
 
     pub async fn fix_finger(&mut self, index: usize) -> Result<(), NetworkError> {
-        let response = self.client
+        let response = self
+            .client
             .fix_finger(FixFingerRequest {
                 index: index as u32,
                 requesting_node: None,
@@ -297,19 +319,24 @@ impl ChordGrpcClient {
             is_shutdown: true,
         };
 
-        let mut stream = self.client
+        let mut stream = self
+            .client
             .request_handoff(request)
             .await
             .map_err(|e| NetworkError::Grpc(format!("Failed to start handoff: {}", e)))?
             .into_inner();
 
         // Process the stream of key-value pairs
-        while let Some(kv) = stream.message().await
-            .map_err(|e| NetworkError::Grpc(format!("Error receiving handoff data: {}", e)))? {
+        while let Some(kv) = stream
+            .message()
+            .await
+            .map_err(|e| NetworkError::Grpc(format!("Error receiving handoff data: {}", e)))?
+        {
             // Send to the channel if available
             if let Some(tx) = &self.handoff_tx {
-                tx.send(kv).await
-                    .map_err(|_| NetworkError::Grpc("Failed to send key-value pair to channel".into()))?;
+                tx.send(kv).await.map_err(|_| {
+                    NetworkError::Grpc("Failed to send key-value pair to channel".into())
+                })?;
             }
         }
 

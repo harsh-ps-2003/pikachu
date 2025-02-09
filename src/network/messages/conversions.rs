@@ -1,5 +1,5 @@
-use crate::chord::types::{NodeId, Key, Value};
-use crate::network::messages::chord::{NodeInfo, KeyValue};
+use crate::chord::types::{Key, NodeId, Value};
+use crate::network::messages::chord::{KeyValue, NodeInfo};
 
 impl From<NodeId> for NodeInfo {
     fn from(id: NodeId) -> Self {
@@ -29,4 +29,4 @@ impl From<KeyValue> for (Key, Value) {
     fn from(kv: KeyValue) -> Self {
         (Key(kv.key), Value(kv.value))
     }
-} 
+}

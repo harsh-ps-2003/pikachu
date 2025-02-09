@@ -1,11 +1,11 @@
-use crate::chord::types::{NodeId, FingerTable, SharedFingerTable, KEY_SIZE, Key, Value};
+use crate::chord::types::{FingerTable, Key, NodeId, SharedFingerTable, Value, KEY_SIZE};
 use crate::chord::CHORD_PROTOCOL;
 use crate::error::ConnectionDeniedError;
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::Mutex;
-use std::task::{Context, Poll};
 use std::collections::VecDeque;
+use std::sync::Arc;
+use std::task::{Context, Poll};
+use tokio::sync::Mutex;
 
 // Type alias for connection tracking
 type ConnectionId = String;
@@ -16,15 +16,15 @@ pub enum ChordRoutingEvent {
     SuccessorUpdated(NodeId),
     PredecessorUpdated(NodeId),
     FingerUpdated(usize, NodeId),
-    
+
     // Connection events
     ConnectionEstablished(NodeId),
     ConnectionClosed(NodeId),
-    
+
     // Routing events
     RouteFound(NodeId, NodeId),
     RoutingError(NodeId, String),
-    
+
     // Storage events
     KeyStored(Key),
     KeyRetrieved(Key, Value),
@@ -43,20 +43,20 @@ pub enum ChordRoutingAction {
 pub struct ChordRoutingBehaviour {
     // Node identity
     local_node_id: NodeId,
-    
-    // Routing table 
+
+    // Routing table
     finger_table: SharedFingerTable,
     predecessor: Option<NodeId>,
-    
+
     // Storage
     storage: Arc<Mutex<HashMap<Key, Value>>>,
-    
+
     // Connection tracking
     connected_peers: HashMap<NodeId, Vec<ConnectionId>>,
-    
+
     // Event queue
     events: VecDeque<ChordRoutingEvent>,
-    
+
     // Pending requests
     pending_requests: HashMap<NodeId, ChordRoutingAction>,
 }
@@ -84,22 +84,24 @@ impl ChordRoutingBehaviour {
 
     pub async fn set_successor(&mut self, peer: NodeId) {
         self.finger_table.lock().await.update_finger(0, peer);
-        self.events.push_back(ChordRoutingEvent::SuccessorUpdated(peer));
+        self.events
+            .push_back(ChordRoutingEvent::SuccessorUpdated(peer));
     }
 
     pub fn set_predecessor(&mut self, peer: NodeId) {
         self.predecessor = Some(peer);
-        self.events.push_back(ChordRoutingEvent::PredecessorUpdated(peer));
-        
+        self.events
+            .push_back(ChordRoutingEvent::PredecessorUpdated(peer));
+
         // When predecessor changes, we need to check if any keys need to be transferred
         self.transfer_keys_if_needed();
     }
 
     async fn transfer_keys_if_needed(&mut self) {
         if let Some(pred) = self.predecessor {
-            let pred_id = pred;  // NodeId is already the correct type
+            let pred_id = pred; // NodeId is already the correct type
             let mut keys_to_transfer = Vec::new();
-            
+
             // Check which keys belong to our predecessor
             let storage = self.storage.lock().await;
             for (key, value) in storage.iter() {
@@ -109,7 +111,7 @@ impl ChordRoutingBehaviour {
                 }
             }
             drop(storage);
-            
+
             // Transfer the keys
             for (key, value) in keys_to_transfer {
                 self.store_key(key, value).await;
@@ -119,7 +121,7 @@ impl ChordRoutingBehaviour {
 
     pub async fn store_key(&mut self, key: Key, value: Value) {
         let key_id = NodeId::from_key(&key.0);
-        
+
         // Check if we're responsible for this key
         if let Some(successor) = self.get_successor().await {
             if key_id.is_between(&self.local_node_id, &successor) {
@@ -136,7 +138,7 @@ impl ChordRoutingBehaviour {
 
     pub async fn retrieve_key(&mut self, key: Key) {
         let key_id = NodeId::from_key(&key.0);
-        
+
         // Check if we have the key
         let value_opt = {
             let storage = self.storage.lock().await;
@@ -145,7 +147,8 @@ impl ChordRoutingBehaviour {
 
         match value_opt {
             Some(value) => {
-                self.events.push_back(ChordRoutingEvent::KeyRetrieved(key, value));
+                self.events
+                    .push_back(ChordRoutingEvent::KeyRetrieved(key, value));
             }
             None => {
                 // If we don't have the key, check if we should have it
@@ -165,7 +168,8 @@ impl ChordRoutingBehaviour {
     pub async fn update_finger(&mut self, index: usize, peer: NodeId) {
         if index < KEY_SIZE {
             self.finger_table.lock().await.update_finger(index, peer);
-            self.events.push_back(ChordRoutingEvent::FingerUpdated(index, peer));
+            self.events
+                .push_back(ChordRoutingEvent::FingerUpdated(index, peer));
         }
     }
 
@@ -174,10 +178,11 @@ impl ChordRoutingBehaviour {
             let table = self.finger_table.lock().await;
             table.find_closest_preceding_node(&id)
         };
-        
+
         match closest {
             Some(next_hop) => {
-                self.events.push_back(ChordRoutingEvent::RouteFound(id, next_hop));
+                self.events
+                    .push_back(ChordRoutingEvent::RouteFound(id, next_hop));
             }
             None => {
                 self.events.push_back(ChordRoutingEvent::RoutingError(
@@ -190,11 +195,12 @@ impl ChordRoutingBehaviour {
 
     pub async fn handle_peer_discovered(&mut self, peer: NodeId) {
         // If we don't have a successor yet, or if this peer should be our successor
-        if self.get_successor().await.is_none() || 
-           peer.is_between(&self.local_node_id, &self.get_successor().await.unwrap()) {
+        if self.get_successor().await.is_none()
+            || peer.is_between(&self.local_node_id, &self.get_successor().await.unwrap())
+        {
             self.set_successor(peer).await;
         }
-        
+
         // Update finger table if this peer fits in any interval
         let table = self.finger_table.lock().await;
         for (i, entry) in table.entries.iter().enumerate() {
@@ -209,7 +215,7 @@ impl ChordRoutingBehaviour {
     pub async fn handle_peer_expired(&mut self, peer: &NodeId) {
         // Remove from connected peers
         self.connected_peers.remove(peer);
-        
+
         // If this was our successor, we need to find a new one
         if let Some(successor) = self.get_successor().await {
             if &successor == peer {
@@ -226,7 +232,7 @@ impl ChordRoutingBehaviour {
                 }
             }
         }
-        
+
         // If this was our predecessor, clear it and check keys
         if let Some(pred) = self.predecessor {
             if &pred == peer {
@@ -236,4 +242,3 @@ impl ChordRoutingBehaviour {
         }
     }
 }
- 
