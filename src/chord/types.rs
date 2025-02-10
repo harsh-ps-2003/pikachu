@@ -78,9 +78,17 @@ impl NodeId {
         let mut result = [0u8; 32];
         let mut hasher = Sha256::new();
 
-        // Convert node ID and 2^k to big-endian bytes
+        // Convert node ID to bytes
         let node_bytes = self.0;
-        let power = 1u32 << k;
+        
+        // Calculate 2^k safely using checked operations
+        let power = if k >= 32 {
+            // For large k, directly use max u32 to avoid overflow
+            u32::MAX
+        } else {
+            1u32.checked_shl(k as u32).unwrap_or(u32::MAX)
+        };
+        
         let power_bytes = power.to_be_bytes();
 
         // Hash the concatenation to get (n + 2^k) mod 2^256
@@ -111,32 +119,36 @@ impl NodeId {
     pub fn get_finger_id(&self, n: usize) -> NodeId {
         assert!(n < KEY_SIZE);
 
-        // Create a new array for the result
+        // In Chord, the i-th finger is (n + 2^i) mod 2^m
+        // For 256-bit space, we'll use byte-wise addition with carry
         let mut result = [0u8; 32];
-
-        // Copy the original ID
         result.copy_from_slice(&self.0);
 
-        // Calculate the power of 2 for this finger
-        let power = 2u128.pow(n as u32);
+        // Calculate which byte and bit position we need to modify
+        let byte_pos = (n / 8) as usize;
+        let bit_pos = (n % 8) as u8;
 
-        // Convert to big-endian bytes
-        let power_bytes = power.to_be_bytes();
-
-        // Add the power to the current ID (with overflow handling)
-        let mut carry = 0u8;
-        for i in (0..16).rev() {
-            let sum = result[16 + i] as u16 + power_bytes[i] as u16 + carry as u16;
-            result[16 + i] = sum as u8;
-            carry = (sum >> 8) as u8;
+        if byte_pos >= 32 {
+            return NodeId(result);
         }
 
-        // Handle any remaining carry
+        // Start from the target byte and propagate carry if needed
+        let mut carry = 0u8;
+        let idx = 31 - byte_pos;  // Start from least significant byte
+        
+        // Set the bit in the correct position
+        let current = result[idx];
+        let bit_mask = 1u8 << bit_pos;
+        let (new_val, overflow) = current.overflowing_add(bit_mask);
+        result[idx] = new_val;
+        carry = if overflow { 1 } else { 0 };
+
+        // Propagate carry through more significant bytes
         if carry > 0 {
-            for i in (0..16).rev() {
-                let sum = result[i] as u16 + carry as u16;
-                result[i] = sum as u8;
-                carry = (sum >> 8) as u8;
+            for i in (0..idx).rev() {
+                let (new_val, overflow) = result[i].overflowing_add(carry);
+                result[i] = new_val;
+                carry = if overflow { 1 } else { 0 };
                 if carry == 0 {
                     break;
                 }
@@ -146,7 +158,7 @@ impl NodeId {
         NodeId(result)
     }
 
-    /// Generate a random NodeId in the hash space
+    /// Generate a random NodeId in the 256-bit hash space
     pub fn random() -> Self {
         let mut rng = rand::thread_rng();
         let mut bytes = [0u8; 32];
@@ -154,28 +166,36 @@ impl NodeId {
         NodeId(bytes)
     }
 
-    /// Generate a random NodeId with specified number of bits
-    pub fn random_with_bits(bits: u32) -> Self {
-        let mut rng = rand::thread_rng();
-        let mut bytes = [0u8; 32];
-        rng.fill_bytes(&mut bytes);
+    // Add a method to add two NodeIds with modular arithmetic
+    pub fn add(&self, other: &NodeId) -> NodeId {
+        let mut result = [0u8; 32];
+        let mut carry = 0u8;
 
-        // Apply mask for the specified number of bits
-        let full_bytes = (bits / 8) as usize;
-        let remaining_bits = (bits % 8) as u8;
-
-        // Zero out unused bytes
-        for i in full_bytes + 1..32 {
-            bytes[i] = 0;
+        // Add bytes from right to left
+        for i in (0..32).rev() {
+            let (sum1, c1) = self.0[i].overflowing_add(other.0[i]);
+            let (sum2, c2) = sum1.overflowing_add(carry);
+            result[i] = sum2;
+            carry = if c1 || c2 { 1 } else { 0 };
         }
 
-        // Apply mask to the partial byte if needed
-        if remaining_bits > 0 {
-            let mask = !(0xffu8 >> remaining_bits);
-            bytes[full_bytes] &= mask;
+        NodeId(result)
+    }
+
+    // Add a method to subtract two NodeIds with modular arithmetic
+    pub fn subtract(&self, other: &NodeId) -> NodeId {
+        let mut result = [0u8; 32];
+        let mut borrow = 0u8;
+
+        // Subtract bytes from right to left
+        for i in (0..32).rev() {
+            let (diff1, b1) = self.0[i].overflowing_sub(other.0[i]);
+            let (diff2, b2) = diff1.overflowing_sub(borrow);
+            result[i] = diff2;
+            borrow = if b1 || b2 { 1 } else { 0 };
         }
 
-        NodeId(bytes)
+        NodeId(result)
     }
 }
 
@@ -216,7 +236,11 @@ impl FingerTable {
 
     pub fn update_finger(&mut self, index: usize, node: NodeId) {
         if index < self.entries.len() {
-            self.entries[index].node = Some(node);
+            // Only update if the node is actually between start and interval_end
+            let entry = &mut self.entries[index];
+            if node.is_between(&entry.start, &entry.interval_end) {
+                entry.node = Some(node);
+            }
         }
     }
 
@@ -225,6 +249,7 @@ impl FingerTable {
     }
 
     pub fn find_closest_preceding_node(&self, id: &NodeId) -> Option<NodeId> {
+        // Check finger table entries from highest to lowest
         for entry in self.entries.iter().rev() {
             if let Some(node) = entry.node {
                 if node.is_between(&self.node_id, id) {
@@ -339,15 +364,21 @@ impl ChordNode {
                 .await
                 .map_err(|e| ChordError::JoinFailed(e.to_string()))?;
         } else {
-            // Create new network
+            // Create new network - we are the only node
             let mut finger_table = self.finger_table.lock().await;
             for i in 0..KEY_SIZE {
                 finger_table.update_finger(i, self.node_id);
             }
             drop(finger_table);
 
+            // Initialize successor list with ourselves
             let mut successor_list = self.successor_list.lock().await;
             successor_list.push(self.node_id);
+            drop(successor_list);
+
+            // Add our own address to the node addresses map
+            let mut addresses = self.node_addresses.lock().await;
+            addresses.insert(self.node_id, self.local_addr.clone());
         }
 
         Ok(())

@@ -11,15 +11,12 @@ pub use thread::GrpcThread;
 pub struct PeerConfig {
     /// Optional gRPC port (random if not specified)
     pub grpc_port: Option<u16>,
-    /// Number of bits for node IDs (default: 160 for SHA-1)
-    pub network_bits: Option<u32>,
 }
 
 impl Default for PeerConfig {
     fn default() -> Self {
         Self {
             grpc_port: None,
-            network_bits: Some(160),
         }
     }
 }

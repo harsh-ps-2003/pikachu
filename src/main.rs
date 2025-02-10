@@ -18,10 +18,6 @@ use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 
-const DEFAULT_NETWORK_BITS: u32 = 160; // Use 160-bit IDs by default (SHA-1)
-const MIN_NETWORK_BITS: u32 = 32; // Minimum allowed network size
-const MAX_NETWORK_BITS: u32 = 256; // Maximum allowed network size
-
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
 struct Cli {
@@ -40,22 +36,7 @@ enum Commands {
         /// Bootstrap node address (if joining existing network)
         #[arg(short, long)]
         bootstrap: Option<String>,
-
-        /// Number of bits for node IDs (32-256, default: 160)
-        #[arg(short, long, default_value_t = DEFAULT_NETWORK_BITS)]
-        network_bits: u32,
     },
-}
-
-fn validate_network_bits(bits: u32) -> Result<(), String> {
-    if bits < MIN_NETWORK_BITS || bits > MAX_NETWORK_BITS {
-        Err(format!(
-            "Network bits must be between {} and {}",
-            MIN_NETWORK_BITS, MAX_NETWORK_BITS
-        ))
-    } else {
-        Ok(())
-    }
 }
 
 #[tokio::main]
@@ -66,18 +47,10 @@ async fn main() -> Result<(), String> {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Start {
-            port,
-            bootstrap,
-            network_bits,
-        } => {
-            // Validate network bits
-            validate_network_bits(network_bits)?;
-
-            // Create peer configuration with network size
+        Commands::Start { port, bootstrap } => {
+            // Create peer configuration
             let config = PeerConfig {
                 grpc_port: port,
-                network_bits: Some(network_bits),
             };
 
             // Create and initialize peer

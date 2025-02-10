@@ -17,6 +17,25 @@ const SUCCESSOR_CHECK_INTERVAL: Duration = Duration::from_secs(20);
 const MAX_HEARTBEAT_RETRIES: u32 = 3;
 const SUCCESSOR_LIST_SIZE: usize = 3;
 const MAX_SUCCESSOR_LIST_SIZE: usize = 3;
+const MAX_RETRIES: u32 = 3;
+const RETRY_DELAY: Duration = Duration::from_secs(1);
+
+async fn connect_with_retry(addr: &str) -> Option<ChordGrpcClient> {
+    for i in 0..MAX_RETRIES {
+        match ChordGrpcClient::new(addr.to_string()).await {
+            Ok(client) => return Some(client),
+            Err(e) => {
+                if i < MAX_RETRIES - 1 {
+                    warn!("Failed to connect to {}, attempt {}/{}: {}", addr, i + 1, MAX_RETRIES, e);
+                    sleep(RETRY_DELAY).await;
+                } else {
+                    error!("Failed to connect to {} after {} attempts: {}", addr, MAX_RETRIES, e);
+                }
+            }
+        }
+    }
+    None
+}
 
 pub async fn run_stabilize_worker(config: ThreadConfig) {
     info!("Starting stabilize worker");
@@ -49,30 +68,34 @@ pub async fn run_stabilize_worker(config: ThreadConfig) {
             };
 
             // Connect to successor and get their predecessor
-            match ChordGrpcClient::new(successor_addr.to_string()).await {
-                Ok(mut client) => {
-                    match client.get_predecessor().await {
-                        Ok(pred_info) => {
-                            if let Some(x) = pred_info.predecessor {
-                                let x_id = NodeId::from_bytes(&x.node_id);
+            if let Some(mut client) = connect_with_retry(&successor_addr).await {
+                match client.get_predecessor().await {
+                    Ok(pred_info) => {
+                        if let Some(x) = pred_info.predecessor {
+                            let x_id = NodeId::from_bytes(&x.node_id);
 
-                                // Update successor if needed
-                                let mut successor_list = config.successor_list.lock().await;
-                                if x_id != successor {
-                                    successor_list.insert(0, x_id);
-                                    debug!("Updated successor to {}", x_id);
-                                }
+                            // Update successor if needed
+                            let mut successor_list = config.successor_list.lock().await;
+                            if x_id != successor {
+                                successor_list.insert(0, x_id);
+                                debug!("Updated successor to {}", x_id);
                             }
                         }
-                        Err(e) => error!("Failed to get predecessor from successor: {}", e),
                     }
+                    Err(e) => error!("Failed to get predecessor from successor: {}", e),
+                }
 
-                    // Notify successor about us
-                    if let Err(e) = client.notify(config.local_node_id).await {
-                        error!("Failed to notify successor: {}", e);
+                // Notify successor about us
+                if let Err(e) = client.notify(config.local_node_id.clone()).await {
+                    warn!("Failed to notify successor: {}", e);
+                    // Remove failed successor and try next one
+                    let mut successors = config.successor_list.lock().await;
+                    if let Some(first) = successors.first() {
+                        if first == &successor {
+                            successors.remove(0);
+                        }
                     }
                 }
-                Err(e) => error!("Failed to connect to successor: {}", e),
             }
         }
     }
@@ -119,8 +142,8 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
 
             // Attempt heartbeat with retries
             while retry_count < MAX_HEARTBEAT_RETRIES && !is_alive {
-                match ChordGrpcClient::new(pred_addr.clone()).await {
-                    Ok(mut client) => match client.heartbeat().await {
+                match connect_with_retry(&pred_addr).await {
+                    Some(mut client) => match client.heartbeat().await {
                         Ok(response) => {
                             if response.alive {
                                 is_alive = true;
@@ -136,11 +159,11 @@ pub async fn run_predecessor_checker(config: ThreadConfig) {
                             );
                         }
                     },
-                    Err(e) => {
+                    None => {
                         warn!(
                             "Failed to connect to predecessor (attempt {}): {}",
                             retry_count + 1,
-                            e
+                            "No address found"
                         );
                     }
                 }
@@ -192,25 +215,29 @@ async fn trigger_stabilization(config: &ThreadConfig) -> Result<(), ChordError> 
 }
 
 pub async fn run_finger_maintainer(config: ThreadConfig) {
-    let mut client = match ChordGrpcClient::new(config.local_addr).await {
-        Ok(client) => client,
-        Err(e) => {
-            error!("Failed to create gRPC client for finger maintainer: {}", e);
-            return;
-        }
-    };
-
-    let mut next_finger = 0;
-
+    let finger_interval = Duration::from_secs(60);
+    
     loop {
-        sleep(FINGER_FIX_INTERVAL).await;
-        debug!("Fixing finger table entry {}", next_finger);
-
-        if let Err(e) = client.fix_finger(next_finger).await {
-            error!("Failed to fix finger {}: {}", next_finger, e);
+        for i in 0..256 {
+            let target = config.local_node_id.add_power_of_two(i as u8);
+            
+            if let Some(successor) = config.successor_list.lock().await.first().cloned() {
+                if let Some(addr) = config.get_node_addr(&successor).await {
+                    if let Some(mut client) = connect_with_retry(&addr).await {
+                        match client.find_successor(target.to_bytes().to_vec()).await {
+                            Ok(node_info) => {
+                                let mut finger_table = config.finger_table.lock().await;
+                                finger_table.update_finger(i, NodeId::from_bytes(&node_info.node_id));
+                            }
+                            Err(e) => {
+                                warn!("Failed to update finger table entry {}: {}", i, e);
+                            }
+                        }
+                    }
+                }
+            }
         }
-
-        next_finger = (next_finger + 1) % KEY_SIZE;
+        sleep(finger_interval).await;
     }
 }
 
@@ -255,8 +282,8 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
         };
 
         // Get successor's successor list
-        match ChordGrpcClient::new(successor_addr.clone()).await {
-            Ok(mut client) => {
+        match connect_with_retry(&successor_addr).await {
+            Some(mut client) => {
                 match client.get_successor_list().await {
                     Ok(successor_list) => {
                         // Create new successor list starting with our immediate successor
@@ -292,10 +319,10 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
                     }
                 }
             }
-            Err(e) => {
+            None => {
                 error!(
                     "Failed to connect to successor {}: {}",
-                    immediate_successor, e
+                    immediate_successor, "No address found"
                 );
                 handle_successor_failure(&config, &immediate_successor).await;
             }

@@ -14,44 +14,43 @@ use futures::StreamExt;
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::time::Duration;
+use tokio::sync::mpsc;
 use tokio::select;
 
 pub struct ChordPeer {
     chord_handle: ChordHandle,
     chord_node: ChordNode,
     port: u16,
+    _actor_handle: tokio::task::JoinHandle<()>, // Store actor handle to maintain lifetime
 }
 
 impl ChordPeer {
     pub async fn new(config: PeerConfig) -> Result<Self, NetworkError> {
-        // Get network bits configuration
-        let network_bits = config.network_bits.unwrap_or(160);
-
-        // Create a random NodeId in the configured hash space
-        let node_id = NodeId::random_with_bits(network_bits);
+        // Create a random NodeId in the 256-bit hash space
+        let node_id = NodeId::random();
 
         // Get port for gRPC server
         let port = config.grpc_port.unwrap_or_else(|| get_random_port());
 
-        // Create the local address
-        let local_addr = format!("127.0.0.1:{}", port);
+        // Create the local address string
+        let addr = format!("127.0.0.1:{}", port);
 
         // Create the chord node
-        let chord_node = ChordNode::new(node_id, local_addr.clone()).await;
+        let chord_node = ChordNode::new(node_id, addr.clone()).await;
 
-        // Create the actor and get its handle
-        let (chord_handle, mut chord_actor) =
-            ChordHandle::new(node_id, port, local_addr.clone()).await;
+        // Create the actor system
+        let (chord_handle, mut actor) = ChordHandle::new(node_id, port, addr.clone()).await;
 
-        // Spawn the actor task
-        tokio::spawn(async move {
-            chord_actor.run().await;
+        // Spawn the actor and store its handle
+        let actor_handle = tokio::spawn(async move {
+            actor.run().await;
         });
 
         Ok(Self {
             chord_handle,
             chord_node,
             port,
+            _actor_handle: actor_handle,
         })
     }
 
