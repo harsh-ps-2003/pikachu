@@ -416,14 +416,21 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
         let mut successor_list = node.successor_list.lock().await;
         if successor_list.is_empty() {
             debug!("No successors to stabilize with, attempting emergency recovery");
-            drop(successor_list);
-            attempt_emergency_recovery(&node).await;
+            drop(successor_list); // Drop lock before recovery
+            if let Err(e) = attempt_emergency_recovery(&node).await {
+                error!("Emergency recovery failed: {}", e);
+                // Add exponential backoff before next attempt
+                tokio::time::sleep(interval * 2).await;
+            }
             continue;
         }
 
         let immediate_successor = successor_list[0];
         let mut stabilized = false;
         let mut failed_nodes = Vec::new();
+        
+        // Drop the lock to avoid holding it during network operations
+        drop(successor_list);
 
         // Try to stabilize with immediate successor with retries
         if let Some(addr) = node.get_node_address(&immediate_successor).await {
@@ -432,72 +439,21 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
             let mut backoff = Duration::from_millis(100);
 
             while retry_count < max_retries && !stabilized {
-                match ChordGrpcClient::new(addr.clone()).await {
-                    Ok(mut client) => {
-                        match client.stabilize().await {
-                            Ok(_) => {
-                                // Get predecessor info with proper validation
-                                match client.get_predecessor().await {
-                                    Ok(pred_resp) => {
-                                        if let Some(pred_info) = pred_resp.predecessor {
-                                            let pred_id = NodeId::from_bytes(&pred_info.node_id);
-                                            if validate_predecessor(
-                                                &node,
-                                                &pred_id,
-                                                &immediate_successor,
-                                            )
-                                            .await
-                                            {
-                                                // Update successor list with the new node
-                                                successor_list.insert(0, pred_id);
-                                                successor_list.truncate(MAX_SUCCESSOR_LIST_SIZE);
-
-                                                // Update node address atomically
-                                                update_node_address(
-                                                    &node,
-                                                    pred_id,
-                                                    pred_info.address,
-                                                )
-                                                .await;
-                                                stabilized = true;
-                                                break;
-                                            }
-                                        }
-                                        stabilized = true; // No predecessor or invalid, but node is responsive
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        error!(
-                                            "Failed to get predecessor info (attempt {}): {}",
-                                            retry_count + 1,
-                                            e
-                                        );
-                                        retry_count += 1;
-                                        if retry_count < max_retries {
-                                            tokio::time::sleep(backoff).await;
-                                            backoff *= 2;
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                error!(
-                                    "Failed to stabilize with successor {} (attempt {}): {}",
-                                    immediate_successor,
-                                    retry_count + 1,
-                                    e
-                                );
-                                retry_count += 1;
-                                if retry_count < max_retries {
-                                    tokio::time::sleep(backoff).await;
-                                    backoff *= 2;
-                                }
-                            }
-                        }
+                match stabilize_with_successor(&node, immediate_successor, addr.clone()).await {
+                    Ok(true) => {
+                        stabilized = true;
+                        debug!("Successfully stabilized with immediate successor {}", immediate_successor);
+                        break;
+                    }
+                    Ok(false) => {
+                        // Successor is reachable but invalid
+                        debug!("Invalid successor state detected for {}", immediate_successor);
+                        failed_nodes.push(immediate_successor);
+                        break;
                     }
                     Err(e) => {
                         error!(
-                            "Failed to connect to successor {} (attempt {}): {}",
+                            "Failed to stabilize with successor {} (attempt {}): {}",
                             immediate_successor,
                             retry_count + 1,
                             e
@@ -506,42 +462,49 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
                         if retry_count < max_retries {
                             tokio::time::sleep(backoff).await;
                             backoff *= 2;
+                        } else {
+                            failed_nodes.push(immediate_successor);
                         }
                     }
                 }
-            }
-
-            if !stabilized {
-                failed_nodes.push(immediate_successor);
             }
         } else {
             error!("No address found for successor {}", immediate_successor);
             failed_nodes.push(immediate_successor);
         }
 
-        // If stabilization with immediate successor failed, try backup successors
+        // Only try backup successors if not stabilized
         if !stabilized {
-            for &succ in successor_list.iter().skip(1) {
-                if let Some(addr) = node.get_node_address(&succ).await {
-                    match stabilize_with_backup(&node, succ, addr).await {
-                        Ok(()) => {
-                            // Promote this successor to immediate successor
+            let backup_successors = {
+                let successors = node.successor_list.lock().await;
+                successors.iter().skip(1).cloned().collect::<Vec<_>>()
+            };
+
+            for backup_successor in backup_successors {
+                if let Some(addr) = node.get_node_address(&backup_successor).await {
+                    match validate_and_stabilize_with_backup(&node, backup_successor, addr).await {
+                        Ok(true) => {
+                            // Successfully validated and stabilized with backup
+                            let mut successor_list = node.successor_list.lock().await;
                             successor_list.retain(|&x| !failed_nodes.contains(&x));
-                            successor_list.insert(0, succ);
+                            successor_list.insert(0, backup_successor);
                             successor_list.truncate(MAX_SUCCESSOR_LIST_SIZE);
 
                             // Update finger table atomically
-                            update_finger_table(&node, 0, succ).await;
+                            update_finger_table(&node, 0, backup_successor).await;
                             stabilized = true;
                             break;
                         }
+                        Ok(false) => {
+                            // Backup is reachable but invalid
+                            failed_nodes.push(backup_successor);
+                        }
                         Err(_) => {
-                            failed_nodes.push(succ);
+                            failed_nodes.push(backup_successor);
                         }
                     }
                 } else {
-                    error!("No address found for backup successor {}", succ);
-                    failed_nodes.push(succ);
+                    failed_nodes.push(backup_successor);
                 }
             }
         }
@@ -549,12 +512,26 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
         // Handle failed nodes and cleanup
         if !failed_nodes.is_empty() {
             handle_failed_nodes(&node, &failed_nodes).await;
+            let mut successor_list = node.successor_list.lock().await;
             successor_list.retain(|&x| !failed_nodes.contains(&x));
+            
+            // If list becomes empty after cleanup, trigger emergency recovery
+            if successor_list.is_empty() {
+                drop(successor_list);
+                if let Err(e) = attempt_emergency_recovery(&node).await {
+                    error!("Emergency recovery after cleanup failed: {}", e);
+                }
+            }
         }
 
-        // Maintain backup successors
-        if let Some(&immediate_successor) = successor_list.first() {
-            maintain_backup_successors(&node, immediate_successor).await;
+        // Only maintain backup successors if we have a valid immediate successor
+        if stabilized {
+            if let Some(immediate_successor) = {
+                let successors = node.successor_list.lock().await;
+                successors.first().cloned()
+            } {
+                maintain_backup_successors(&node, immediate_successor).await;
+            }
         }
 
         // Validate network state periodically
@@ -562,7 +539,70 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
     }
 }
 
-async fn attempt_emergency_recovery(node: &Arc<ChordNode>) {
+// Helper function to stabilize with a successor
+async fn stabilize_with_successor(node: &Arc<ChordNode>, successor: NodeId, addr: String) -> Result<bool, ChordError> {
+    let mut client = ChordGrpcClient::new(addr).await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
+    
+    // First verify the successor is alive and valid
+    if let Err(e) = client.heartbeat().await {
+        return Err(ChordError::StabilizationFailed(format!("Successor heartbeat failed: {}", e)));
+    }
+
+    client.stabilize().await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to stabilize with successor: {}", e)))?;
+
+    // Get and validate predecessor info
+    match client.get_predecessor().await {
+        Ok(pred_resp) => {
+            if let Some(pred_info) = pred_resp.predecessor {
+                let pred_id = NodeId::from_bytes(&pred_info.node_id);
+                if validate_predecessor(node, &pred_id, &successor).await {
+                    // Update successor list with the new node
+                    let mut successor_list = node.successor_list.lock().await;
+                    successor_list.insert(0, pred_id);
+                    successor_list.truncate(MAX_SUCCESSOR_LIST_SIZE);
+
+                    // Update node address atomically
+                    update_node_address(node, pred_id, pred_info.address).await;
+                    return Ok(true);
+                }
+            }
+            // No predecessor or invalid predecessor, but node is responsive
+            Ok(true)
+        }
+        Err(e) => Err(ChordError::StabilizationFailed(format!("Failed to get predecessor info: {}", e)))
+    }
+}
+
+// Helper function to validate and stabilize with a backup successor
+async fn validate_and_stabilize_with_backup(node: &Arc<ChordNode>, successor: NodeId, addr: String) -> Result<bool, ChordError> {
+    let mut client = ChordGrpcClient::new(addr).await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
+    
+    // First verify the backup is alive
+    if let Err(e) = client.heartbeat().await {
+        return Err(ChordError::StabilizationFailed(format!("Backup successor heartbeat failed: {}", e)));
+    }
+
+    // Verify the backup's state is consistent
+    match client.get_predecessor().await {
+        Ok(pred_resp) => {
+            if let Some(pred_info) = pred_resp.predecessor {
+                let pred_id = NodeId::from_bytes(&pred_info.node_id);
+                if !validate_predecessor(node, &pred_id, &successor).await {
+                    return Ok(false);
+                }
+            }
+        }
+        Err(e) => return Err(ChordError::StabilizationFailed(format!("Failed to validate backup successor: {}", e)))
+    }
+
+    // Try to stabilize
+    client.stabilize().await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to stabilize with backup: {}", e)))?;
+    
+    Ok(true)
+}
+
+// Modified emergency recovery function
+async fn attempt_emergency_recovery(node: &Arc<ChordNode>) -> Result<(), ChordError> {
     debug!("Attempting emergency recovery of successor list");
 
     // Try to rebuild from finger table
@@ -579,37 +619,27 @@ async fn attempt_emergency_recovery(node: &Arc<ChordNode>) {
         successors
     };
 
+    let mut recovered = false;
     for &potential_successor in &potential_successors {
         if let Some(addr) = node.get_node_address(&potential_successor).await {
-            if let Ok(mut client) = ChordGrpcClient::new(addr).await {
-                if client.stabilize().await.is_ok() {
+            match validate_and_stabilize_with_backup(node, potential_successor, addr).await {
+                Ok(true) => {
                     let mut successor_list = node.successor_list.lock().await;
                     successor_list.push(potential_successor);
-                    debug!(
-                        "Emergency recovery: Added {} as successor",
-                        potential_successor
-                    );
-
-                    // Try to get their successor list
-                    if let Ok(successors) = client.get_successor_list().await {
-                        for succ_info in successors {
-                            let succ_id = NodeId::from_bytes(&succ_info.node_id);
-                            if !successor_list.contains(&succ_id) {
-                                successor_list.push(succ_id);
-                                // Update node address
-                                let mut addresses = node.node_addresses.lock().await;
-                                addresses.insert(succ_id, succ_info.address);
-                            }
-                        }
-                        successor_list.truncate(MAX_SUCCESSOR_LIST_SIZE);
-                        return;
-                    }
+                    debug!("Emergency recovery: Added {} as successor", potential_successor);
+                    recovered = true;
+                    break;
                 }
+                _ => continue
             }
         }
     }
 
-    error!("Emergency recovery failed to find any valid successors");
+    if !recovered {
+        return Err(ChordError::StabilizationFailed("Emergency recovery failed to find any valid successors".into()));
+    }
+
+    Ok(())
 }
 
 async fn validate_predecessor(node: &Arc<ChordNode>, pred_id: &NodeId, successor: &NodeId) -> bool {
@@ -635,34 +665,6 @@ async fn update_node_address(node: &Arc<ChordNode>, node_id: NodeId, addr: Strin
 async fn update_finger_table(node: &Arc<ChordNode>, index: usize, new_node: NodeId) {
     let mut finger_table = node.finger_table.lock().await;
     finger_table.update_finger(index, new_node);
-}
-
-async fn stabilize_with_backup(
-    node: &Arc<ChordNode>,
-    succ: NodeId,
-    addr: String,
-) -> Result<(), ChordError> {
-    let mut client = ChordGrpcClient::new(addr)
-        .await
-        .map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
-
-    client
-        .stabilize()
-        .await
-        .map_err(|e| ChordError::StabilizationFailed(format!("Failed to stabilize: {}", e)))?;
-
-    // Additional validation
-    if let Ok(pred_resp) = client.get_predecessor().await {
-        if let Some(pred_info) = pred_resp.predecessor {
-            let pred_id = NodeId::from_bytes(&pred_info.node_id);
-            if validate_predecessor(node, &pred_id, &succ).await {
-                let mut addresses = node.node_addresses.lock().await;
-                addresses.insert(pred_id, pred_info.address);
-            }
-        }
-    }
-
-    Ok(())
 }
 
 async fn handle_failed_nodes(node: &Arc<ChordNode>, failed_nodes: &[NodeId]) {

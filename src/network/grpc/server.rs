@@ -135,34 +135,19 @@ impl ChordNodeService for ChordGrpcServer {
             .ok_or_else(|| Status::invalid_argument("Missing joining node info"))?;
         let node_id = NodeId::from_bytes(&joining_node.node_id);
 
+        // Acquire all locks in a consistent order to prevent deadlocks
         let mut successor_list = self.config.successor_list.lock().await;
         let mut predecessor = self.config.predecessor.lock().await;
+        let mut addresses = self.config.node_addresses.lock().await;
 
         // Add the joining node to our successor list if it should be
         if successor_list.is_empty() || node_id.is_between(&self.node.node_id, &successor_list[0]) {
+            // Update all state atomically
             successor_list.insert(0, node_id);
             *predecessor = Some(node_id);
-
-            // Update node addresses
-            let mut addresses = self.config.node_addresses.lock().await;
             addresses.insert(node_id, joining_node.address.clone());
-
-            // Trigger immediate stabilization
-            drop(successor_list); // Release lock before stabilization
-            drop(predecessor);
-            drop(addresses);
-
-            if let Some(addr) = self.node.get_node_address(&node_id).await {
-                if let Ok(mut client) = ChordGrpcClient::new(addr).await {
-                    if let Err(e) = client.stabilize().await {
-                        error!("Failed to stabilize with joining node: {}", e);
-                    }
-                }
-            }
-
-            // Reacquire locks for response
-            successor_list = self.config.successor_list.lock().await;
-            predecessor = self.config.predecessor.lock().await;
+            
+            debug!("Node {} joined the network", node_id);
         }
 
         let successor_addr = self
@@ -173,7 +158,7 @@ impl ChordNodeService for ChordGrpcServer {
 
         // Get predecessor info if it exists
         let pred_info = if let Some(p) = predecessor.as_ref() {
-            let addr = self.config.get_node_addr(p).await.unwrap_or_default();
+            let addr = addresses.get(p).cloned().unwrap_or_default();
             Some(NodeInfo {
                 node_id: p.to_bytes().to_vec(),
                 address: addr,
