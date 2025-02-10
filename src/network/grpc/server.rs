@@ -146,7 +146,7 @@ impl ChordNodeService for ChordGrpcServer {
             successor_list.insert(0, node_id);
             *predecessor = Some(node_id);
             addresses.insert(node_id, joining_node.address.clone());
-            
+
             debug!("Node {} joined the network", node_id);
         }
 

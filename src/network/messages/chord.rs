@@ -254,10 +254,10 @@ pub mod chord_node_client {
         dead_code,
         missing_docs,
         clippy::wildcard_imports,
-        clippy::let_unit_value,
+        clippy::let_unit_value
     )]
-    use tonic::codegen::*;
     use tonic::codegen::http::Uri;
+    use tonic::codegen::*;
     #[derive(Debug, Clone)]
     pub struct ChordNodeClient<T> {
         inner: tonic::client::Grpc<T>,
@@ -301,9 +301,8 @@ pub mod chord_node_client {
                     <T as tonic::client::GrpcService<tonic::body::BoxBody>>::ResponseBody,
                 >,
             >,
-            <T as tonic::codegen::Service<
-                http::Request<tonic::body::BoxBody>,
-            >>::Error: Into<StdError> + std::marker::Send + std::marker::Sync,
+            <T as tonic::codegen::Service<http::Request<tonic::body::BoxBody>>>::Error:
+                Into<StdError> + std::marker::Send + std::marker::Sync,
         {
             ChordNodeClient::new(InterceptedService::new(inner, interceptor))
         }
@@ -343,54 +342,42 @@ pub mod chord_node_client {
             &mut self,
             request: impl tonic::IntoRequest<super::LookupRequest>,
         ) -> std::result::Result<tonic::Response<super::LookupResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Lookup");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Lookup"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Lookup"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn put(
             &mut self,
             request: impl tonic::IntoRequest<super::PutRequest>,
         ) -> std::result::Result<tonic::Response<super::PutResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Put");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Put"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Put"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn get(
             &mut self,
             request: impl tonic::IntoRequest<super::GetRequest>,
         ) -> std::result::Result<tonic::Response<super::GetResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Get");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Get"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Get"));
             self.inner.unary(req, path, codec).await
         }
         /// Chord maintenance operations
@@ -398,80 +385,54 @@ pub mod chord_node_client {
             &mut self,
             request: impl tonic::IntoRequest<super::JoinRequest>,
         ) -> std::result::Result<tonic::Response<super::JoinResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Join");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Join"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Join"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn notify(
             &mut self,
             request: impl tonic::IntoRequest<super::NotifyRequest>,
         ) -> std::result::Result<tonic::Response<super::NotifyResponse>, tonic::Status> {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Notify");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Notify"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Notify"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn stabilize(
             &mut self,
             request: impl tonic::IntoRequest<super::StabilizeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::StabilizeResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::StabilizeResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/Stabilize",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Stabilize");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Stabilize"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Stabilize"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn find_successor(
             &mut self,
             request: impl tonic::IntoRequest<super::FindSuccessorRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::FindSuccessorResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::FindSuccessorResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/FindSuccessor",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/FindSuccessor");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("chord.ChordNode", "FindSuccessor"));
@@ -480,22 +441,13 @@ pub mod chord_node_client {
         pub async fn get_predecessor(
             &mut self,
             request: impl tonic::IntoRequest<super::GetPredecessorRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetPredecessorResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::GetPredecessorResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/GetPredecessor",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/GetPredecessor");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("chord.ChordNode", "GetPredecessor"));
@@ -504,22 +456,13 @@ pub mod chord_node_client {
         pub async fn get_successor_list(
             &mut self,
             request: impl tonic::IntoRequest<super::GetSuccessorListRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetSuccessorListResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::GetSuccessorListResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/GetSuccessorList",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/GetSuccessorList");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("chord.ChordNode", "GetSuccessorList"));
@@ -528,93 +471,57 @@ pub mod chord_node_client {
         pub async fn fix_finger(
             &mut self,
             request: impl tonic::IntoRequest<super::FixFingerRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::FixFingerResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::FixFingerResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/FixFinger",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/FixFinger");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "FixFinger"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "FixFinger"));
             self.inner.unary(req, path, codec).await
         }
         /// Health check
         pub async fn heartbeat(
             &mut self,
             request: impl tonic::IntoRequest<super::HeartbeatRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::HeartbeatResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::HeartbeatResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/Heartbeat",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Heartbeat");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Heartbeat"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Heartbeat"));
             self.inner.unary(req, path, codec).await
         }
         /// Data replication and transfer
         pub async fn replicate(
             &mut self,
             request: impl tonic::IntoRequest<super::ReplicateRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReplicateResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::ReplicateResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/Replicate",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Replicate");
             let mut req = request.into_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Replicate"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Replicate"));
             self.inner.unary(req, path, codec).await
         }
         pub async fn transfer_keys(
             &mut self,
             request: impl tonic::IntoRequest<super::TransferKeysRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TransferKeysResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::TransferKeysResponse>, tonic::Status>
+        {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/TransferKeys",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/TransferKeys");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("chord.ChordNode", "TransferKeys"));
@@ -624,22 +531,15 @@ pub mod chord_node_client {
         pub async fn handoff(
             &mut self,
             request: impl tonic::IntoStreamingRequest<Message = super::KeyValue>,
-        ) -> std::result::Result<
-            tonic::Response<super::HandoffResponse>,
-            tonic::Status,
-        > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+        ) -> std::result::Result<tonic::Response<super::HandoffResponse>, tonic::Status> {
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
             let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/Handoff");
             let mut req = request.into_streaming_request();
-            req.extensions_mut().insert(GrpcMethod::new("chord.ChordNode", "Handoff"));
+            req.extensions_mut()
+                .insert(GrpcMethod::new("chord.ChordNode", "Handoff"));
             self.inner.client_streaming(req, path, codec).await
         }
         pub async fn request_handoff(
@@ -649,18 +549,11 @@ pub mod chord_node_client {
             tonic::Response<tonic::codec::Streaming<super::KeyValue>>,
             tonic::Status,
         > {
-            self.inner
-                .ready()
-                .await
-                .map_err(|e| {
-                    tonic::Status::unknown(
-                        format!("Service was not ready: {}", e.into()),
-                    )
-                })?;
+            self.inner.ready().await.map_err(|e| {
+                tonic::Status::unknown(format!("Service was not ready: {}", e.into()))
+            })?;
             let codec = tonic::codec::ProstCodec::default();
-            let path = http::uri::PathAndQuery::from_static(
-                "/chord.ChordNode/RequestHandoff",
-            );
+            let path = http::uri::PathAndQuery::from_static("/chord.ChordNode/RequestHandoff");
             let mut req = request.into_request();
             req.extensions_mut()
                 .insert(GrpcMethod::new("chord.ChordNode", "RequestHandoff"));
@@ -675,7 +568,7 @@ pub mod chord_node_server {
         dead_code,
         missing_docs,
         clippy::wildcard_imports,
-        clippy::let_unit_value,
+        clippy::let_unit_value
     )]
     use tonic::codegen::*;
     /// Generated trait containing gRPC methods that should be implemented for use with ChordNodeServer.
@@ -706,61 +599,37 @@ pub mod chord_node_server {
         async fn stabilize(
             &self,
             request: tonic::Request<super::StabilizeRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::StabilizeResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::StabilizeResponse>, tonic::Status>;
         async fn find_successor(
             &self,
             request: tonic::Request<super::FindSuccessorRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::FindSuccessorResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::FindSuccessorResponse>, tonic::Status>;
         async fn get_predecessor(
             &self,
             request: tonic::Request<super::GetPredecessorRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetPredecessorResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::GetPredecessorResponse>, tonic::Status>;
         async fn get_successor_list(
             &self,
             request: tonic::Request<super::GetSuccessorListRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::GetSuccessorListResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::GetSuccessorListResponse>, tonic::Status>;
         async fn fix_finger(
             &self,
             request: tonic::Request<super::FixFingerRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::FixFingerResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::FixFingerResponse>, tonic::Status>;
         /// Health check
         async fn heartbeat(
             &self,
             request: tonic::Request<super::HeartbeatRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::HeartbeatResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::HeartbeatResponse>, tonic::Status>;
         /// Data replication and transfer
         async fn replicate(
             &self,
             request: tonic::Request<super::ReplicateRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::ReplicateResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::ReplicateResponse>, tonic::Status>;
         async fn transfer_keys(
             &self,
             request: tonic::Request<super::TransferKeysRequest>,
-        ) -> std::result::Result<
-            tonic::Response<super::TransferKeysResponse>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<super::TransferKeysResponse>, tonic::Status>;
         /// Efficient streaming handoff for large datasets
         async fn handoff(
             &self,
@@ -769,16 +638,12 @@ pub mod chord_node_server {
         /// Server streaming response type for the RequestHandoff method.
         type RequestHandoffStream: tonic::codegen::tokio_stream::Stream<
                 Item = std::result::Result<super::KeyValue, tonic::Status>,
-            >
-            + std::marker::Send
+            > + std::marker::Send
             + 'static;
         async fn request_handoff(
             &self,
             request: tonic::Request<super::HandoffRequest>,
-        ) -> std::result::Result<
-            tonic::Response<Self::RequestHandoffStream>,
-            tonic::Status,
-        >;
+        ) -> std::result::Result<tonic::Response<Self::RequestHandoffStream>, tonic::Status>;
     }
     #[derive(Debug)]
     pub struct ChordNodeServer<T> {
@@ -801,10 +666,7 @@ pub mod chord_node_server {
                 max_encoding_message_size: None,
             }
         }
-        pub fn with_interceptor<F>(
-            inner: T,
-            interceptor: F,
-        ) -> InterceptedService<Self, F>
+        pub fn with_interceptor<F>(inner: T, interceptor: F) -> InterceptedService<Self, F>
         where
             F: tonic::service::Interceptor,
         {
@@ -859,21 +721,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Lookup" => {
                     #[allow(non_camel_case_types)]
                     struct LookupSvc<T: ChordNode>(pub Arc<T>);
-                    impl<T: ChordNode> tonic::server::UnaryService<super::LookupRequest>
-                    for LookupSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::LookupRequest> for LookupSvc<T> {
                         type Response = super::LookupResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::LookupRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::lookup(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::lookup(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -902,21 +759,15 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Put" => {
                     #[allow(non_camel_case_types)]
                     struct PutSvc<T: ChordNode>(pub Arc<T>);
-                    impl<T: ChordNode> tonic::server::UnaryService<super::PutRequest>
-                    for PutSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::PutRequest> for PutSvc<T> {
                         type Response = super::PutResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::PutRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::put(&inner, request).await
-                            };
+                            let fut = async move { <T as ChordNode>::put(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -945,21 +796,15 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Get" => {
                     #[allow(non_camel_case_types)]
                     struct GetSvc<T: ChordNode>(pub Arc<T>);
-                    impl<T: ChordNode> tonic::server::UnaryService<super::GetRequest>
-                    for GetSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::GetRequest> for GetSvc<T> {
                         type Response = super::GetResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::GetRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::get(&inner, request).await
-                            };
+                            let fut = async move { <T as ChordNode>::get(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -988,21 +833,15 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Join" => {
                     #[allow(non_camel_case_types)]
                     struct JoinSvc<T: ChordNode>(pub Arc<T>);
-                    impl<T: ChordNode> tonic::server::UnaryService<super::JoinRequest>
-                    for JoinSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::JoinRequest> for JoinSvc<T> {
                         type Response = super::JoinResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::JoinRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::join(&inner, request).await
-                            };
+                            let fut = async move { <T as ChordNode>::join(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1031,21 +870,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Notify" => {
                     #[allow(non_camel_case_types)]
                     struct NotifySvc<T: ChordNode>(pub Arc<T>);
-                    impl<T: ChordNode> tonic::server::UnaryService<super::NotifyRequest>
-                    for NotifySvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::NotifyRequest> for NotifySvc<T> {
                         type Response = super::NotifyResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::NotifyRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::notify(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::notify(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1074,23 +908,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Stabilize" => {
                     #[allow(non_camel_case_types)]
                     struct StabilizeSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::StabilizeRequest>
-                    for StabilizeSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::StabilizeRequest> for StabilizeSvc<T> {
                         type Response = super::StabilizeResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::StabilizeRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::stabilize(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::stabilize(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1119,15 +946,11 @@ pub mod chord_node_server {
                 "/chord.ChordNode/FindSuccessor" => {
                     #[allow(non_camel_case_types)]
                     struct FindSuccessorSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::FindSuccessorRequest>
-                    for FindSuccessorSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::FindSuccessorRequest>
+                        for FindSuccessorSvc<T>
+                    {
                         type Response = super::FindSuccessorResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::FindSuccessorRequest>,
@@ -1164,15 +987,11 @@ pub mod chord_node_server {
                 "/chord.ChordNode/GetPredecessor" => {
                     #[allow(non_camel_case_types)]
                     struct GetPredecessorSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::GetPredecessorRequest>
-                    for GetPredecessorSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::GetPredecessorRequest>
+                        for GetPredecessorSvc<T>
+                    {
                         type Response = super::GetPredecessorResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::GetPredecessorRequest>,
@@ -1209,15 +1028,11 @@ pub mod chord_node_server {
                 "/chord.ChordNode/GetSuccessorList" => {
                     #[allow(non_camel_case_types)]
                     struct GetSuccessorListSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::GetSuccessorListRequest>
-                    for GetSuccessorListSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::GetSuccessorListRequest>
+                        for GetSuccessorListSvc<T>
+                    {
                         type Response = super::GetSuccessorListResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::GetSuccessorListRequest>,
@@ -1254,23 +1069,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/FixFinger" => {
                     #[allow(non_camel_case_types)]
                     struct FixFingerSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::FixFingerRequest>
-                    for FixFingerSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::FixFingerRequest> for FixFingerSvc<T> {
                         type Response = super::FixFingerResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::FixFingerRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::fix_finger(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::fix_finger(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1299,23 +1107,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Heartbeat" => {
                     #[allow(non_camel_case_types)]
                     struct HeartbeatSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::HeartbeatRequest>
-                    for HeartbeatSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::HeartbeatRequest> for HeartbeatSvc<T> {
                         type Response = super::HeartbeatResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::HeartbeatRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::heartbeat(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::heartbeat(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1344,23 +1145,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Replicate" => {
                     #[allow(non_camel_case_types)]
                     struct ReplicateSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::ReplicateRequest>
-                    for ReplicateSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::ReplicateRequest> for ReplicateSvc<T> {
                         type Response = super::ReplicateResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::ReplicateRequest>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::replicate(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::replicate(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1389,15 +1183,9 @@ pub mod chord_node_server {
                 "/chord.ChordNode/TransferKeys" => {
                     #[allow(non_camel_case_types)]
                     struct TransferKeysSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::UnaryService<super::TransferKeysRequest>
-                    for TransferKeysSvc<T> {
+                    impl<T: ChordNode> tonic::server::UnaryService<super::TransferKeysRequest> for TransferKeysSvc<T> {
                         type Response = super::TransferKeysResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::TransferKeysRequest>,
@@ -1434,23 +1222,16 @@ pub mod chord_node_server {
                 "/chord.ChordNode/Handoff" => {
                     #[allow(non_camel_case_types)]
                     struct HandoffSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::ClientStreamingService<super::KeyValue>
-                    for HandoffSvc<T> {
+                    impl<T: ChordNode> tonic::server::ClientStreamingService<super::KeyValue> for HandoffSvc<T> {
                         type Response = super::HandoffResponse;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::Response>,
-                            tonic::Status,
-                        >;
+                        type Future = BoxFuture<tonic::Response<Self::Response>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<tonic::Streaming<super::KeyValue>>,
                         ) -> Self::Future {
                             let inner = Arc::clone(&self.0);
-                            let fut = async move {
-                                <T as ChordNode>::handoff(&inner, request).await
-                            };
+                            let fut =
+                                async move { <T as ChordNode>::handoff(&inner, request).await };
                             Box::pin(fut)
                         }
                     }
@@ -1479,16 +1260,13 @@ pub mod chord_node_server {
                 "/chord.ChordNode/RequestHandoff" => {
                     #[allow(non_camel_case_types)]
                     struct RequestHandoffSvc<T: ChordNode>(pub Arc<T>);
-                    impl<
-                        T: ChordNode,
-                    > tonic::server::ServerStreamingService<super::HandoffRequest>
-                    for RequestHandoffSvc<T> {
+                    impl<T: ChordNode> tonic::server::ServerStreamingService<super::HandoffRequest>
+                        for RequestHandoffSvc<T>
+                    {
                         type Response = super::KeyValue;
                         type ResponseStream = T::RequestHandoffStream;
-                        type Future = BoxFuture<
-                            tonic::Response<Self::ResponseStream>,
-                            tonic::Status,
-                        >;
+                        type Future =
+                            BoxFuture<tonic::Response<Self::ResponseStream>, tonic::Status>;
                         fn call(
                             &mut self,
                             request: tonic::Request<super::HandoffRequest>,
@@ -1522,23 +1300,19 @@ pub mod chord_node_server {
                     };
                     Box::pin(fut)
                 }
-                _ => {
-                    Box::pin(async move {
-                        let mut response = http::Response::new(empty_body());
-                        let headers = response.headers_mut();
-                        headers
-                            .insert(
-                                tonic::Status::GRPC_STATUS,
-                                (tonic::Code::Unimplemented as i32).into(),
-                            );
-                        headers
-                            .insert(
-                                http::header::CONTENT_TYPE,
-                                tonic::metadata::GRPC_CONTENT_TYPE,
-                            );
-                        Ok(response)
-                    })
-                }
+                _ => Box::pin(async move {
+                    let mut response = http::Response::new(empty_body());
+                    let headers = response.headers_mut();
+                    headers.insert(
+                        tonic::Status::GRPC_STATUS,
+                        (tonic::Code::Unimplemented as i32).into(),
+                    );
+                    headers.insert(
+                        http::header::CONTENT_TYPE,
+                        tonic::metadata::GRPC_CONTENT_TYPE,
+                    );
+                    Ok(response)
+                }),
             }
         }
     }

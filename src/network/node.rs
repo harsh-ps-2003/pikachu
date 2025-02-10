@@ -24,20 +24,26 @@ pub struct ChordPeer {
 
 impl ChordPeer {
     pub async fn new(config: PeerConfig) -> Result<Self, NetworkError> {
-        // Create a random NodeId in the hash space
-        let node_id = NodeId::random();
+        // Get network bits configuration
+        let network_bits = config.network_bits.unwrap_or(160);
+
+        // Create a random NodeId in the configured hash space
+        let node_id = NodeId::random_with_bits(network_bits);
 
         // Get port for gRPC server
         let port = config.grpc_port.unwrap_or_else(|| get_random_port());
 
-        // Initialize ChordNode with local address
-        let local_addr = format!("http://127.0.0.1:{}", port);
+        // Create the local address
+        let local_addr = format!("127.0.0.1:{}", port);
+
+        // Create the chord node
         let chord_node = ChordNode::new(node_id, local_addr.clone()).await;
 
-        // Create ChordHandle and actor
-        let (chord_handle, mut chord_actor) = ChordHandle::new(node_id, port, local_addr).await;
+        // Create the actor and get its handle
+        let (chord_handle, mut chord_actor) =
+            ChordHandle::new(node_id, port, local_addr.clone()).await;
 
-        // Spawn actor with proper Send bounds
+        // Spawn the actor task
         tokio::spawn(async move {
             chord_actor.run().await;
         });

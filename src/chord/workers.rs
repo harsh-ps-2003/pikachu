@@ -428,7 +428,7 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
         let immediate_successor = successor_list[0];
         let mut stabilized = false;
         let mut failed_nodes = Vec::new();
-        
+
         // Drop the lock to avoid holding it during network operations
         drop(successor_list);
 
@@ -442,12 +442,18 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
                 match stabilize_with_successor(&node, immediate_successor, addr.clone()).await {
                     Ok(true) => {
                         stabilized = true;
-                        debug!("Successfully stabilized with immediate successor {}", immediate_successor);
+                        debug!(
+                            "Successfully stabilized with immediate successor {}",
+                            immediate_successor
+                        );
                         break;
                     }
                     Ok(false) => {
                         // Successor is reachable but invalid
-                        debug!("Invalid successor state detected for {}", immediate_successor);
+                        debug!(
+                            "Invalid successor state detected for {}",
+                            immediate_successor
+                        );
                         failed_nodes.push(immediate_successor);
                         break;
                     }
@@ -514,7 +520,7 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
             handle_failed_nodes(&node, &failed_nodes).await;
             let mut successor_list = node.successor_list.lock().await;
             successor_list.retain(|&x| !failed_nodes.contains(&x));
-            
+
             // If list becomes empty after cleanup, trigger emergency recovery
             if successor_list.is_empty() {
                 drop(successor_list);
@@ -540,15 +546,26 @@ pub async fn run_stabilize(node: Arc<ChordNode>, interval: Duration) {
 }
 
 // Helper function to stabilize with a successor
-async fn stabilize_with_successor(node: &Arc<ChordNode>, successor: NodeId, addr: String) -> Result<bool, ChordError> {
-    let mut client = ChordGrpcClient::new(addr).await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
-    
+async fn stabilize_with_successor(
+    node: &Arc<ChordNode>,
+    successor: NodeId,
+    addr: String,
+) -> Result<bool, ChordError> {
+    let mut client = ChordGrpcClient::new(addr)
+        .await
+        .map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
+
     // First verify the successor is alive and valid
     if let Err(e) = client.heartbeat().await {
-        return Err(ChordError::StabilizationFailed(format!("Successor heartbeat failed: {}", e)));
+        return Err(ChordError::StabilizationFailed(format!(
+            "Successor heartbeat failed: {}",
+            e
+        )));
     }
 
-    client.stabilize().await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to stabilize with successor: {}", e)))?;
+    client.stabilize().await.map_err(|e| {
+        ChordError::StabilizationFailed(format!("Failed to stabilize with successor: {}", e))
+    })?;
 
     // Get and validate predecessor info
     match client.get_predecessor().await {
@@ -569,17 +586,29 @@ async fn stabilize_with_successor(node: &Arc<ChordNode>, successor: NodeId, addr
             // No predecessor or invalid predecessor, but node is responsive
             Ok(true)
         }
-        Err(e) => Err(ChordError::StabilizationFailed(format!("Failed to get predecessor info: {}", e)))
+        Err(e) => Err(ChordError::StabilizationFailed(format!(
+            "Failed to get predecessor info: {}",
+            e
+        ))),
     }
 }
 
 // Helper function to validate and stabilize with a backup successor
-async fn validate_and_stabilize_with_backup(node: &Arc<ChordNode>, successor: NodeId, addr: String) -> Result<bool, ChordError> {
-    let mut client = ChordGrpcClient::new(addr).await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
-    
+async fn validate_and_stabilize_with_backup(
+    node: &Arc<ChordNode>,
+    successor: NodeId,
+    addr: String,
+) -> Result<bool, ChordError> {
+    let mut client = ChordGrpcClient::new(addr)
+        .await
+        .map_err(|e| ChordError::StabilizationFailed(format!("Failed to create client: {}", e)))?;
+
     // First verify the backup is alive
     if let Err(e) = client.heartbeat().await {
-        return Err(ChordError::StabilizationFailed(format!("Backup successor heartbeat failed: {}", e)));
+        return Err(ChordError::StabilizationFailed(format!(
+            "Backup successor heartbeat failed: {}",
+            e
+        )));
     }
 
     // Verify the backup's state is consistent
@@ -592,12 +621,19 @@ async fn validate_and_stabilize_with_backup(node: &Arc<ChordNode>, successor: No
                 }
             }
         }
-        Err(e) => return Err(ChordError::StabilizationFailed(format!("Failed to validate backup successor: {}", e)))
+        Err(e) => {
+            return Err(ChordError::StabilizationFailed(format!(
+                "Failed to validate backup successor: {}",
+                e
+            )))
+        }
     }
 
     // Try to stabilize
-    client.stabilize().await.map_err(|e| ChordError::StabilizationFailed(format!("Failed to stabilize with backup: {}", e)))?;
-    
+    client.stabilize().await.map_err(|e| {
+        ChordError::StabilizationFailed(format!("Failed to stabilize with backup: {}", e))
+    })?;
+
     Ok(true)
 }
 
@@ -626,17 +662,22 @@ async fn attempt_emergency_recovery(node: &Arc<ChordNode>) -> Result<(), ChordEr
                 Ok(true) => {
                     let mut successor_list = node.successor_list.lock().await;
                     successor_list.push(potential_successor);
-                    debug!("Emergency recovery: Added {} as successor", potential_successor);
+                    debug!(
+                        "Emergency recovery: Added {} as successor",
+                        potential_successor
+                    );
                     recovered = true;
                     break;
                 }
-                _ => continue
+                _ => continue,
             }
         }
     }
 
     if !recovered {
-        return Err(ChordError::StabilizationFailed("Emergency recovery failed to find any valid successors".into()));
+        return Err(ChordError::StabilizationFailed(
+            "Emergency recovery failed to find any valid successors".into(),
+        ));
     }
 
     Ok(())

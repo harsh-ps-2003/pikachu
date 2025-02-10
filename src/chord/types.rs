@@ -153,6 +153,30 @@ impl NodeId {
         rng.fill_bytes(&mut bytes);
         NodeId(bytes)
     }
+
+    /// Generate a random NodeId with specified number of bits
+    pub fn random_with_bits(bits: u32) -> Self {
+        let mut rng = rand::thread_rng();
+        let mut bytes = [0u8; 32];
+        rng.fill_bytes(&mut bytes);
+
+        // Apply mask for the specified number of bits
+        let full_bytes = (bits / 8) as usize;
+        let remaining_bits = (bits % 8) as u8;
+
+        // Zero out unused bytes
+        for i in full_bytes + 1..32 {
+            bytes[i] = 0;
+        }
+
+        // Apply mask to the partial byte if needed
+        if remaining_bits > 0 {
+            let mask = !(0xffu8 >> remaining_bits);
+            bytes[full_bytes] &= mask;
+        }
+
+        NodeId(bytes)
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]

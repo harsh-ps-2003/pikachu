@@ -6,7 +6,20 @@ pub use client::ChordGrpcClient;
 pub use server::ChordGrpcServer;
 pub use thread::GrpcThread;
 
+/// Configuration for a Chord peer node
+#[derive(Debug, Clone)]
 pub struct PeerConfig {
-    pub grpc_port: Option<u16>, // Optional gRPC port (random if not specified)
-                                // ... other config options ...
+    /// Optional gRPC port (random if not specified)
+    pub grpc_port: Option<u16>,
+    /// Number of bits for node IDs (default: 160 for SHA-1)
+    pub network_bits: Option<u32>,
+}
+
+impl Default for PeerConfig {
+    fn default() -> Self {
+        Self {
+            grpc_port: None,
+            network_bits: Some(160),
+        }
+    }
 }
