@@ -38,61 +38,78 @@ async fn connect_with_retry(addr: &str) -> Option<ChordGrpcClient> {
 }
 
 pub async fn run_stabilize_worker(config: ThreadConfig) {
-    info!("Starting stabilize worker");
-    let mut next_stabilize = tokio::time::Instant::now();
-
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    
     loop {
-        // Wait until next stabilize interval
-        let now = tokio::time::Instant::now();
-        if now < next_stabilize {
-            sleep(next_stabilize - now).await;
-            next_stabilize += STABILIZE_INTERVAL;
+        interval.tick().await;
+        
+        // For bootstrap node with no other nodes, skip stabilization
+        let has_other_nodes = {
+            let addresses = config.node_addresses.lock().await;
+            addresses.len() > 1
+        };
+        
+        if !has_other_nodes {
+            debug!("Bootstrap node has no other nodes yet, skipping stabilization");
+            continue;
         }
 
-        debug!("Running stabilize");
+        info!("Starting stabilize worker");
+        let mut next_stabilize = tokio::time::Instant::now();
 
-        // Get current successor
-        let successor = {
-            let successor_list = config.successor_list.lock().await;
-            successor_list.first().cloned()
-        };
+        loop {
+            // Wait until next stabilize interval
+            let now = tokio::time::Instant::now();
+            if now < next_stabilize {
+                sleep(next_stabilize - now).await;
+                next_stabilize += STABILIZE_INTERVAL;
+            }
 
-        if let Some(successor) = successor {
-            // Get successor's address
-            let successor_addr = match config.get_node_addr(&successor).await {
-                Some(addr) => addr,
-                None => {
-                    error!("No address found for successor {}", successor);
-                    continue;
-                }
+            debug!("Running stabilize");
+
+            // Get current successor
+            let successor = {
+                let successor_list = config.successor_list.lock().await;
+                successor_list.first().cloned()
             };
 
-            // Connect to successor and get their predecessor
-            if let Some(mut client) = connect_with_retry(&successor_addr).await {
-                match client.get_predecessor().await {
-                    Ok(pred_info) => {
-                        if let Some(x) = pred_info.predecessor {
-                            let x_id = NodeId::from_bytes(&x.node_id);
+            if let Some(successor) = successor {
+                // Get successor's address
+                let successor_addr = match config.get_node_addr(&successor).await {
+                    Some(addr) => addr,
+                    None => {
+                        error!("No address found for successor {}", successor);
+                        continue;
+                    }
+                };
 
-                            // Update successor if needed
-                            let mut successor_list = config.successor_list.lock().await;
-                            if x_id != successor {
-                                successor_list.insert(0, x_id);
-                                debug!("Updated successor to {}", x_id);
+                // Connect to successor and get their predecessor
+                if let Some(mut client) = connect_with_retry(&successor_addr).await {
+                    match client.get_predecessor().await {
+                        Ok(pred_info) => {
+                            if let Some(x) = pred_info.predecessor {
+                                let x_id = NodeId::from_bytes(&x.node_id);
+
+                                // Update successor if needed
+                                let mut successor_list = config.successor_list.lock().await;
+                                if x_id != successor {
+                                    successor_list.insert(0, x_id);
+                                    debug!("Updated successor to {}", x_id);
+                                }
                             }
                         }
+                        Err(e) => error!("Failed to get predecessor from successor: {}", e),
                     }
-                    Err(e) => error!("Failed to get predecessor from successor: {}", e),
-                }
 
-                // Notify successor about us
-                if let Err(e) = client.notify(config.local_node_id.clone()).await {
-                    warn!("Failed to notify successor: {}", e);
-                    // Remove failed successor and try next one
-                    let mut successors = config.successor_list.lock().await;
-                    if let Some(first) = successors.first() {
-                        if first == &successor {
-                            successors.remove(0);
+                    // Notify successor about us
+                    if let Err(e) = client.notify(config.local_node_id.clone()).await {
+                        warn!("Failed to notify successor: {}", e);
+                        // Remove failed successor and try next one
+                        let mut successors = config.successor_list.lock().await;
+                        if let Some(first) = successors.first() {
+                            if first == &successor {
+                                successors.remove(0);
+                            }
                         }
                     }
                 }
@@ -103,91 +120,108 @@ pub async fn run_stabilize_worker(config: ThreadConfig) {
 
 /// Worker thread that periodically checks predecessor's health via heartbeat
 pub async fn run_predecessor_checker(config: ThreadConfig) {
-    info!("Starting predecessor health checker");
-    let mut next_check = tokio::time::Instant::now();
-
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    
     loop {
-        // Wait until next check interval
-        let now = tokio::time::Instant::now();
-        if now < next_check {
-            sleep(next_check - now).await;
-            next_check += PREDECESSOR_CHECK_INTERVAL;
+        interval.tick().await;
+        
+        // For bootstrap node with no other nodes, skip predecessor check
+        let has_other_nodes = {
+            let addresses = config.node_addresses.lock().await;
+            addresses.len() > 1
+        };
+        
+        if !has_other_nodes {
+            debug!("Bootstrap node has no other nodes yet, skipping predecessor check");
+            continue;
         }
 
-        debug!("Checking predecessor health");
+        info!("Starting predecessor health checker");
+        let mut next_check = tokio::time::Instant::now();
 
-        // Get current predecessor
-        let predecessor = {
-            let guard = config.predecessor.lock().await;
-            guard.clone()
-        };
+        loop {
+            // Wait until next check interval
+            let now = tokio::time::Instant::now();
+            if now < next_check {
+                sleep(next_check - now).await;
+                next_check += PREDECESSOR_CHECK_INTERVAL;
+            }
 
-        // If we have a predecessor, check its health
-        if let Some(pred_id) = predecessor {
-            let mut retry_count = 0;
-            let mut is_alive = false;
+            debug!("Checking predecessor health");
 
-            // Try to get predecessor's address
-            let pred_addr = match config.get_node_addr(&pred_id).await {
-                Some(addr) => addr,
-                None => {
-                    warn!(
-                        "No address found for predecessor {}, marking as failed",
-                        pred_id
-                    );
-                    clear_predecessor(&config).await;
-                    continue;
-                }
+            // Get current predecessor
+            let predecessor = {
+                let guard = config.predecessor.lock().await;
+                guard.clone()
             };
 
-            // Attempt heartbeat with retries
-            while retry_count < MAX_HEARTBEAT_RETRIES && !is_alive {
-                match connect_with_retry(&pred_addr).await {
-                    Some(mut client) => match client.heartbeat().await {
-                        Ok(response) => {
-                            if response.alive {
-                                is_alive = true;
-                                debug!("Predecessor {} is alive", pred_id);
-                                break;
-                            }
-                        }
-                        Err(e) => {
-                            warn!(
-                                "Heartbeat to predecessor failed (attempt {}): {}",
-                                retry_count + 1,
-                                e
-                            );
-                        }
-                    },
+            // If we have a predecessor, check its health
+            if let Some(pred_id) = predecessor {
+                let mut retry_count = 0;
+                let mut is_alive = false;
+
+                // Try to get predecessor's address
+                let pred_addr = match config.get_node_addr(&pred_id).await {
+                    Some(addr) => addr,
                     None => {
                         warn!(
-                            "Failed to connect to predecessor (attempt {}): {}",
-                            retry_count + 1,
-                            "No address found"
+                            "No address found for predecessor {}, marking as failed",
+                            pred_id
                         );
+                        clear_predecessor(&config).await;
+                        continue;
+                    }
+                };
+
+                // Attempt heartbeat with retries
+                while retry_count < MAX_HEARTBEAT_RETRIES && !is_alive {
+                    match connect_with_retry(&pred_addr).await {
+                        Some(mut client) => match client.heartbeat().await {
+                            Ok(response) => {
+                                if response.alive {
+                                    is_alive = true;
+                                    debug!("Predecessor {} is alive", pred_id);
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                warn!(
+                                    "Heartbeat to predecessor failed (attempt {}): {}",
+                                    retry_count + 1,
+                                    e
+                                );
+                            }
+                        },
+                        None => {
+                            warn!(
+                                "Failed to connect to predecessor (attempt {}): {}",
+                                retry_count + 1,
+                                "No address found"
+                            );
+                        }
+                    }
+
+                    retry_count += 1;
+                    if retry_count < MAX_HEARTBEAT_RETRIES {
+                        sleep(Duration::from_millis(500)).await;
                     }
                 }
 
-                retry_count += 1;
-                if retry_count < MAX_HEARTBEAT_RETRIES {
-                    sleep(Duration::from_millis(500)).await;
-                }
-            }
-
-            // If all retries failed, clear predecessor
-            if !is_alive {
-                warn!(
-                    "Predecessor {} failed all heartbeat attempts, marking as failed",
-                    pred_id
-                );
-                clear_predecessor(&config).await;
-
-                // Trigger immediate stabilization to find new predecessor
-                if let Err(e) = trigger_stabilization(&config).await {
-                    error!(
-                        "Failed to trigger stabilization after predecessor failure: {}",
-                        e
+                // If all retries failed, clear predecessor
+                if !is_alive {
+                    warn!(
+                        "Predecessor {} failed all heartbeat attempts, marking as failed",
+                        pred_id
                     );
+                    clear_predecessor(&config).await;
+
+                    // Trigger immediate stabilization to find new predecessor
+                    if let Err(e) = trigger_stabilization(&config).await {
+                        error!(
+                            "Failed to trigger stabilization after predecessor failure: {}",
+                            e
+                        );
+                    }
                 }
             }
         }
@@ -215,116 +249,150 @@ async fn trigger_stabilization(config: &ThreadConfig) -> Result<(), ChordError> 
 }
 
 pub async fn run_finger_maintainer(config: ThreadConfig) {
-    let finger_interval = Duration::from_secs(60);
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
     
     loop {
-        for i in 0..256 {
-            let target = config.local_node_id.add_power_of_two(i as u8);
-            
-            if let Some(successor) = config.successor_list.lock().await.first().cloned() {
-                if let Some(addr) = config.get_node_addr(&successor).await {
-                    if let Some(mut client) = connect_with_retry(&addr).await {
-                        match client.find_successor(target.to_bytes().to_vec()).await {
-                            Ok(node_info) => {
-                                let mut finger_table = config.finger_table.lock().await;
-                                finger_table.update_finger(i, NodeId::from_bytes(&node_info.node_id));
-                            }
-                            Err(e) => {
-                                warn!("Failed to update finger table entry {}: {}", i, e);
+        interval.tick().await;
+        
+        // For bootstrap node with no other nodes, skip finger maintenance
+        let has_other_nodes = {
+            let addresses = config.node_addresses.lock().await;
+            addresses.len() > 1
+        };
+        
+        if !has_other_nodes {
+            debug!("Bootstrap node has no other nodes yet, skipping finger maintenance");
+            continue;
+        }
+
+        let finger_interval = Duration::from_secs(60);
+        
+        loop {
+            for i in 0..256 {
+                let target = config.local_node_id.add_power_of_two(i as u8);
+                
+                if let Some(successor) = config.successor_list.lock().await.first().cloned() {
+                    if let Some(addr) = config.get_node_addr(&successor).await {
+                        if let Some(mut client) = connect_with_retry(&addr).await {
+                            match client.find_successor(target.to_bytes().to_vec()).await {
+                                Ok(node_info) => {
+                                    let mut finger_table = config.finger_table.lock().await;
+                                    finger_table.update_finger(i, NodeId::from_bytes(&node_info.node_id));
+                                }
+                                Err(e) => {
+                                    warn!("Failed to update finger table entry {}: {}", i, e);
+                                }
                             }
                         }
                     }
                 }
             }
+            sleep(finger_interval).await;
         }
-        sleep(finger_interval).await;
     }
 }
 
 /// Worker thread that maintains the successor list
 pub async fn run_successor_maintainer(config: ThreadConfig) {
-    info!("Starting successor list maintainer");
-    let mut next_check = tokio::time::Instant::now();
-
+    let mut interval = tokio::time::interval(Duration::from_secs(5));
+    
     loop {
-        // Wait until next check interval
-        let now = tokio::time::Instant::now();
-        if now < next_check {
-            sleep(next_check - now).await;
-            next_check += SUCCESSOR_CHECK_INTERVAL;
-        }
-
-        debug!("Updating successor list");
-
-        // Get current successor list
-        let current_successors = {
-            let guard = config.successor_list.lock().await;
-            guard.clone()
+        interval.tick().await;
+        
+        // For bootstrap node with no other nodes, skip successor maintenance
+        let has_other_nodes = {
+            let addresses = config.node_addresses.lock().await;
+            addresses.len() > 1
         };
-
-        // If we have no successors, we can't update the list
-        if current_successors.is_empty() {
-            warn!("No successors in list, skipping update");
+        
+        if !has_other_nodes {
+            debug!("Bootstrap node has no other nodes yet, skipping successor maintenance");
             continue;
         }
 
-        // Get immediate successor's address
-        let immediate_successor = current_successors[0];
-        let successor_addr = match config.get_node_addr(&immediate_successor).await {
-            Some(addr) => addr,
-            None => {
-                warn!(
-                    "No address found for immediate successor {}",
-                    immediate_successor
-                );
+        info!("Starting successor list maintainer");
+        let mut next_check = tokio::time::Instant::now();
+
+        loop {
+            // Wait until next check interval
+            let now = tokio::time::Instant::now();
+            if now < next_check {
+                sleep(next_check - now).await;
+                next_check += SUCCESSOR_CHECK_INTERVAL;
+            }
+
+            debug!("Updating successor list");
+
+            // Get current successor list
+            let current_successors = {
+                let guard = config.successor_list.lock().await;
+                guard.clone()
+            };
+
+            // If we have no successors, we can't update the list
+            if current_successors.is_empty() {
+                warn!("No successors in list, skipping update");
                 continue;
             }
-        };
 
-        // Get successor's successor list
-        match connect_with_retry(&successor_addr).await {
-            Some(mut client) => {
-                match client.get_successor_list().await {
-                    Ok(successor_list) => {
-                        // Create new successor list starting with our immediate successor
-                        let mut new_successors = vec![immediate_successor];
+            // Get immediate successor's address
+            let immediate_successor = current_successors[0];
+            let successor_addr = match config.get_node_addr(&immediate_successor).await {
+                Some(addr) => addr,
+                None => {
+                    warn!(
+                        "No address found for immediate successor {}",
+                        immediate_successor
+                    );
+                    continue;
+                }
+            };
 
-                        // Add successors from our successor's list until we reach SUCCESSOR_LIST_SIZE
-                        for successor in successor_list {
-                            let successor_id = NodeId::from_bytes(&successor.node_id);
+            // Get successor's successor list
+            match connect_with_retry(&successor_addr).await {
+                Some(mut client) => {
+                    match client.get_successor_list().await {
+                        Ok(successor_list) => {
+                            // Create new successor list starting with our immediate successor
+                            let mut new_successors = vec![immediate_successor];
 
-                            // Don't add duplicates or ourselves
-                            if !new_successors.contains(&successor_id)
-                                && successor_id != config.local_node_id
-                            {
-                                new_successors.push(successor_id);
+                            // Add successors from our successor's list until we reach SUCCESSOR_LIST_SIZE
+                            for successor in successor_list {
+                                let successor_id = NodeId::from_bytes(&successor.node_id);
 
-                                // Store the address for this successor
-                                config.add_node_addr(successor_id, successor.address).await;
+                                // Don't add duplicates or ourselves
+                                if !new_successors.contains(&successor_id)
+                                    && successor_id != config.local_node_id
+                                {
+                                    new_successors.push(successor_id);
 
-                                if new_successors.len() >= SUCCESSOR_LIST_SIZE {
-                                    break;
+                                    // Store the address for this successor
+                                    config.add_node_addr(successor_id, successor.address).await;
+
+                                    if new_successors.len() >= SUCCESSOR_LIST_SIZE {
+                                        break;
+                                    }
                                 }
                             }
-                        }
 
-                        // Update our successor list
-                        let mut guard = config.successor_list.lock().await;
-                        *guard = new_successors;
-                        debug!("Updated successor list: {:?}", guard);
-                    }
-                    Err(e) => {
-                        error!("Failed to get successor list from successor: {}", e);
-                        handle_successor_failure(&config, &immediate_successor).await;
+                            // Update our successor list
+                            let mut guard = config.successor_list.lock().await;
+                            *guard = new_successors;
+                            debug!("Updated successor list: {:?}", guard);
+                        }
+                        Err(e) => {
+                            error!("Failed to get successor list from successor: {}", e);
+                            handle_successor_failure(&config, &immediate_successor).await;
+                        }
                     }
                 }
-            }
-            None => {
-                error!(
-                    "Failed to connect to successor {}: {}",
-                    immediate_successor, "No address found"
-                );
-                handle_successor_failure(&config, &immediate_successor).await;
+                None => {
+                    error!(
+                        "Failed to connect to successor {}: {}",
+                        immediate_successor, "No address found"
+                    );
+                    handle_successor_failure(&config, &immediate_successor).await;
+                }
             }
         }
     }

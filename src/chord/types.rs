@@ -259,6 +259,11 @@ impl FingerTable {
         }
         None
     }
+
+    pub fn has_successors(&self) -> bool {
+        // The first finger is our immediate successor
+        self.entries.first().map_or(false, |f| f.node.is_some())
+    }
 }
 
 // Thread configuration
