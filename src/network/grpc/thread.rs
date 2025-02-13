@@ -8,6 +8,7 @@ use std::sync::Arc;
 use tokio::sync::oneshot;
 use tonic::transport::Server;
 use futures::FutureExt;
+use std::time::Duration;
 
 pub struct GrpcThread {
     node: Arc<ChordNode>,
@@ -31,38 +32,34 @@ impl GrpcThread {
         }
     }
 
-    pub async fn run(&mut self) -> Result<(), NetworkError> {
-        let addr = self.config.local_addr
-            .parse()
-            .map_err(|e| NetworkError::Grpc(format!("Invalid address: {}", e)))?;
-
+    pub async fn run(mut self) -> Result<(), NetworkError> {
+        let addr = self.config.local_addr.parse()
+            .map_err(|e| NetworkError::Grpc(format!("Failed to parse address: {}", e)))?;
+            
         info!("Starting gRPC server on {}", addr);
 
         let server = ChordGrpcServer::new(self.node.clone(), self.config.clone());
-        
-        // Take ownership of shutdown_rx
+
         let shutdown_rx = self.shutdown_rx.take()
-            .ok_or_else(|| NetworkError::Grpc("Shutdown receiver already taken".into()))?;
+            .expect("shutdown_rx should be available");
 
-        // Build and bind the server
         let server = Server::builder()
-            .add_service(ChordNodeServer::new(server))
-            .serve(addr);
+            .tcp_nodelay(true)
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .add_service(ChordNodeServer::new(server));
 
-        // Signal that we're ready to accept connections
         if let Some(ready_tx) = self.ready_tx.take() {
             let _ = ready_tx.send(());
         }
 
-        // Run the server and handle shutdown
-        tokio::select! {
-            result = server => {
-                result.map_err(|e| NetworkError::Grpc(format!("Server error: {}", e)))?;
+        match server.serve_with_shutdown(addr, shutdown_rx.map(|_| ())).await {
+            Ok(_) => {
+                info!("gRPC server shut down gracefully");
                 Ok(())
             }
-            _ = shutdown_rx => {
-                info!("Received shutdown signal");
-                Ok(())
+            Err(e) => {
+                error!("gRPC server encountered a fatal error: {:?}", e);
+                Err(NetworkError::Grpc(format!("Server error: {}", e)))
             }
         }
     }

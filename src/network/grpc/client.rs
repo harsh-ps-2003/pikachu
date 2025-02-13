@@ -14,9 +14,10 @@ use futures::StreamExt;
 use std::pin::Pin;
 use tokio::sync::mpsc;
 use tokio_stream::{self as ts};
-use tonic::transport::Channel;
+use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 use ts::StreamExt as _;
+use std::time::Duration;
 
 pub struct ChordGrpcClient {
     client: ChordNodeClient<Channel>,
@@ -26,9 +27,27 @@ pub struct ChordGrpcClient {
 
 impl ChordGrpcClient {
     pub async fn new(addr: String) -> Result<Self, NetworkError> {
-        let client = ChordNodeClient::connect(addr.clone())
+        // Ensure the address has the correct scheme
+        let addr = if !addr.starts_with("http://") {
+            format!("http://{}", addr)
+        } else {
+            addr
+        };
+
+        // Configure the channel with appropriate settings
+        let channel = Endpoint::from_shared(addr.clone())
+            .map_err(|e| NetworkError::Grpc(format!("Invalid endpoint: {}", e)))?
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(Duration::from_secs(10))
+            .tcp_keepalive(Some(Duration::from_secs(60)))
+            .tcp_nodelay(true)
+            .connect()
             .await
             .map_err(|e| NetworkError::Grpc(format!("Failed to connect: {}", e)))?;
+
+        let client = ChordNodeClient::new(channel)
+            .max_decoding_message_size(16 * 1024 * 1024) // 16MB
+            .max_encoding_message_size(16 * 1024 * 1024); // 16MB
 
         Ok(Self {
             client,

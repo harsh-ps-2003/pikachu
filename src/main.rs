@@ -1,5 +1,5 @@
 use clap::{Parser, Subcommand};
-use log::{error, info};
+use log::{error, info, warn};
 use pikachu::{
     chord::{
         types::{
@@ -15,9 +15,18 @@ use pikachu::{
     network::{grpc::PeerConfig, node::ChordPeer},
 };
 use std::collections::HashMap;
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+// Define localhost constant
+const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// Helper function to convert SocketAddr to gRPC URL
+fn to_grpc_url(addr: SocketAddr) -> String {
+    format!("http://{}", addr)
+}
 
 #[derive(Parser)]
 #[command(author, version, about, long_about = None)]
@@ -76,7 +85,8 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
             let node_port = peer.get_port();
-            info!("Starting bootstrap node on port {}", node_port);
+            let node_addr = SocketAddr::new(LOCALHOST, node_port);
+            info!("Starting bootstrap node on {}", node_addr);
 
             // Initialize as first node in the network
             if let Err(e) = peer.create_network().await {
@@ -85,7 +95,7 @@ async fn main() -> Result<(), String> {
             }
 
             info!("Successfully created new network as bootstrap node");
-            info!("Bootstrap node is running on port: {}", node_port);
+            info!("Bootstrap node is running on: {}", node_addr);
             info!("Other nodes can join using: cargo run join -b {} -p <PORT>", node_port);
 
             // Run the node until interrupted
@@ -111,23 +121,21 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
             let node_port = peer.get_port();
-            info!("Starting node on port {}", node_port);
+            let node_addr = SocketAddr::new(LOCALHOST, node_port);
+            info!("Starting node on {}", node_addr);
 
-            // Give bootstrap node time to initialize if it was just started
-            tokio::time::sleep(Duration::from_secs(2)).await;
-
-            // Construct bootstrap address with proper format
-            let bootstrap_addr = format!("{}:{}", host, bootstrap_port);
+            // Construct bootstrap address
+            let bootstrap_addr = SocketAddr::new(LOCALHOST, bootstrap_port);
             info!("Attempting to join network through bootstrap node: {}", bootstrap_addr);
 
-            // Join the network
-            if let Err(e) = peer.join(bootstrap_addr).await {
+            // Join the network using proper gRPC URL
+            if let Err(e) = peer.join(to_grpc_url(bootstrap_addr)).await {
                 error!("Failed to join network: {}", e);
                 return Err(format!("Failed to join network: {}", e));
             }
 
             info!("Successfully joined the network");
-            info!("Node is running on port: {}", node_port);
+            info!("Node is running on: {}", node_addr);
 
             // Run the node until interrupted
             if let Err(e) = peer.run().await {

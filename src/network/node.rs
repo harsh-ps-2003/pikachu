@@ -33,6 +33,7 @@ pub struct ChordPeer {
     port: u16,
     _actor_handle: tokio::task::JoinHandle<()>, // Store actor handle to maintain lifetime
     grpc_handle: Option<tokio::task::JoinHandle<Result<(), NetworkError>>>, // Store gRPC server handle
+    shutdown_tx: Option<oneshot::Sender<()>>, // Store shutdown sender
 }
 
 impl ChordPeer {
@@ -44,13 +45,13 @@ impl ChordPeer {
         let port = config.grpc_port.unwrap_or_else(|| get_random_port());
 
         // Create the local address string
-        let addr = format!("127.0.0.1:{}", port);
+        let local_addr = format!("127.0.0.1:{}", port);
 
         // Create the chord node
-        let chord_node = ChordNode::new(node_id, addr.clone()).await;
+        let chord_node = ChordNode::new(node_id, local_addr.clone()).await;
 
         // Create the actor system
-        let (chord_handle, mut actor) = ChordHandle::new(node_id, port, addr.clone()).await;
+        let (chord_handle, mut actor) = ChordHandle::new(node_id, port, local_addr.clone()).await;
 
         // Spawn the actor and store its handle
         let actor_handle = tokio::spawn(async move {
@@ -63,6 +64,7 @@ impl ChordPeer {
             port,
             _actor_handle: actor_handle,
             grpc_handle: None,
+            shutdown_tx: None,
         })
     }
 
@@ -75,31 +77,29 @@ impl ChordPeer {
         let (ready_tx, ready_rx) = oneshot::channel();
         let node = Arc::new(self.chord_node.clone());
         let thread_config = self.chord_node.get_shared_state();
-        let local_addr = format!("127.0.0.1:{}", self.port);
-
-        // Try to bind to the address first to ensure it's available
-        let addr = local_addr.parse::<std::net::SocketAddr>().map_err(|e| {
-            error!("Failed to parse address {}: {}", local_addr, e);
-            NetworkError::Grpc(format!("Invalid address: {}", e))
-        })?;
-
-        // Create and start gRPC thread
-        let mut grpc_thread = GrpcThread::new(node.clone(), thread_config.clone(), shutdown_rx, ready_tx);
         
-        info!("Starting gRPC server on {}", local_addr);
-        debug!("Server configuration: local_addr={}, node_id={}", local_addr, self.chord_node.node_id);
+        // Create and start gRPC thread
+        let grpc_thread = GrpcThread::new(
+            node,
+            thread_config,
+            shutdown_rx,
+            ready_tx,
+        );
+        
+        info!("Starting gRPC server on 127.0.0.1:{}", self.port);
         
         let handle = tokio::spawn(async move {
             grpc_thread.run().await
         });
 
-        // Store the handle immediately
+        // Store both the handle and shutdown sender
         self.grpc_handle = Some(handle);
+        self.shutdown_tx = Some(shutdown_tx);
         
         // Wait for server to be ready with a timeout
         match tokio::time::timeout(Duration::from_secs(5), ready_rx).await {
             Ok(Ok(_)) => {
-                info!("gRPC server is ready and listening on {}", local_addr);
+                info!("gRPC server is ready and listening on 127.0.0.1:{}", self.port);
                 Ok(())
             }
             Ok(Err(_)) => {
@@ -244,6 +244,14 @@ impl ChordPeer {
                 }
                 Some(_) = shutdown_rx.recv() => {
                     info!("Shutting down node...");
+                    // Send shutdown signal to gRPC server
+                    if let Some(tx) = self.shutdown_tx.take() {
+                        let _ = tx.send(());
+                        // Wait for gRPC server to shut down
+                        if let Some(handle) = self.grpc_handle.take() {
+                            let _ = handle.await;
+                        }
+                    }
                     break;
                 }
             }

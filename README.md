@@ -2,6 +2,11 @@
 
 A multi-dimensional asynchronous Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
 
+### Demo
+
+To start the bootstrap node, run `cargo run start-bootstrap -p 8001`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node -
+`lsof -i :8001`.
+
 ### System Design
 
 Its not crash fault tolerant.
