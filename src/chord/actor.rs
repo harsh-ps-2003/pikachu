@@ -233,13 +233,51 @@ impl ChordActor {
         self.node.node_id
     }
 
-    async fn notify(&mut self, node: NodeId) -> Result<(), ChordError> {
-        let mut predecessor = self.node.predecessor.lock().await;
-        if predecessor.is_none()
-            || self.is_between(&node, &predecessor.unwrap(), &self.node.node_id)
+    async fn notify(&mut self, node: NodeId, node_addr: String) -> Result<(), ChordError> {
+        debug!("Received notify from node {}", node);
+        
+        let mut update_predecessor = false;
         {
-            *predecessor = Some(node);
+            let mut predecessor = self.node.predecessor.lock().await;
+            if predecessor.is_none() {
+                // If we have no predecessor, accept the new node
+                update_predecessor = true;
+            } else if let Some(pred) = *predecessor {
+                // If the new node is between our current predecessor and us
+                if node.is_between(&pred, &self.node.node_id) {
+                    update_predecessor = true;
+                }
+            }
+
+            if update_predecessor {
+                *predecessor = Some(node);
+                debug!("Updated predecessor to {}", node);
+            }
         }
+
+        if update_predecessor {
+            // Update node address
+            let mut addresses = self.node.node_addresses.lock().await;
+            addresses.insert(node, node_addr);
+
+            // If we're the bootstrap node and this is our first notify
+            let successor_list = self.node.successor_list.lock().await;
+            if successor_list.len() == 1 && successor_list[0] == self.node.node_id {
+                drop(successor_list);
+                
+                // Update our successor to be the new node
+                let mut successor_list = self.node.successor_list.lock().await;
+                successor_list.clear();
+                successor_list.push(node);
+                
+                // Update finger table to point to the new node
+                let mut finger_table = self.node.finger_table.lock().await;
+                finger_table.update_finger(0, node);
+                
+                debug!("Bootstrap node updated successor to {}", node);
+            }
+        }
+
         Ok(())
     }
 

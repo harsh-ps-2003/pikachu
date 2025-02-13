@@ -13,7 +13,7 @@ use crate::network::messages::chord::{
 use chrono::Utc;
 use futures::Stream;
 use futures::StreamExt;
-use log::{debug, error};
+use log::{debug, error, info};
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio::sync::mpsc;
@@ -128,55 +128,90 @@ impl ChordNodeService for ChordGrpcServer {
         }))
     }
 
-    async fn join(&self, request: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
+    async fn join(
+        &self,
+        request: Request<JoinRequest>,
+    ) -> Result<Response<JoinResponse>, Status> {
         let req = request.into_inner();
         let joining_node = req
             .joining_node
             .ok_or_else(|| Status::invalid_argument("Missing joining node info"))?;
         let node_id = NodeId::from_bytes(&joining_node.node_id);
 
-        // Acquire all locks in a consistent order to prevent deadlocks
+        // If we're the bootstrap node and alone in the network
         let mut successor_list = self.config.successor_list.lock().await;
-        let mut predecessor = self.config.predecessor.lock().await;
-        let mut addresses = self.config.node_addresses.lock().await;
+        let is_bootstrap_alone = successor_list.len() == 1 && successor_list[0] == self.node.node_id;
 
-        // Add the joining node to our successor list if it should be
-        if successor_list.is_empty() || node_id.is_between(&self.node.node_id, &successor_list[0]) {
-            // Update all state atomically
-            successor_list.insert(0, node_id);
+        if is_bootstrap_alone {
+            // We become the joining node's successor
+            // And the joining node becomes our predecessor
+            successor_list.clear();
+            successor_list.push(node_id);
+            successor_list.push(self.node.node_id);
+
+            let mut predecessor = self.config.predecessor.lock().await;
             *predecessor = Some(node_id);
+
+            let mut addresses = self.config.node_addresses.lock().await;
             addresses.insert(node_id, joining_node.address.clone());
 
-            debug!("Node {} joined the network", node_id);
+            debug!("Bootstrap node accepting join from {}", node_id);
+
+            return Ok(Response::new(JoinResponse {
+                success: true,
+                successor: Some(NodeInfo {
+                    node_id: self.node.node_id.to_bytes().to_vec(),
+                    address: self.config.local_addr.clone(),
+                }),
+                predecessor: None, // New node starts with no predecessor
+                transferred_data: Vec::new(),
+                error: String::new(),
+            }));
         }
 
-        let successor_addr = self
-            .config
-            .get_node_addr(&successor_list[0])
-            .await
-            .ok_or_else(|| Status::internal("Successor address not found"))?;
+        // Normal join case - find the appropriate position in the ring
+        if successor_list.is_empty() || node_id.is_between(&self.node.node_id, &successor_list[0]) {
+            // The joining node should be between us and our current successor
+            let current_successor = successor_list[0];
+            successor_list.insert(0, node_id);
+            successor_list.truncate(3); // Keep max 3 successors
 
-        // Get predecessor info if it exists
-        let pred_info = if let Some(p) = predecessor.as_ref() {
-            let addr = addresses.get(p).cloned().unwrap_or_default();
-            Some(NodeInfo {
-                node_id: p.to_bytes().to_vec(),
-                address: addr,
-            })
+            let mut predecessor = self.config.predecessor.lock().await;
+            if predecessor.is_none() {
+                *predecessor = Some(node_id);
+            }
+
+            let mut addresses = self.config.node_addresses.lock().await;
+            addresses.insert(node_id, joining_node.address.clone());
+
+            let successor_addr = addresses.get(&current_successor).cloned()
+                .ok_or_else(|| Status::internal("Successor address not found"))?;
+
+            debug!("Node {} joined between {} and {}", node_id, self.node.node_id, current_successor);
+
+            Ok(Response::new(JoinResponse {
+                success: true,
+                successor: Some(NodeInfo {
+                    node_id: current_successor.to_bytes().to_vec(),
+                    address: successor_addr,
+                }),
+                predecessor: Some(NodeInfo {
+                    node_id: self.node.node_id.to_bytes().to_vec(),
+                    address: self.config.local_addr.clone(),
+                }),
+                transferred_data: Vec::new(),
+                error: String::new(),
+            }))
         } else {
-            None
-        };
-
-        Ok(Response::new(JoinResponse {
-            success: true,
-            successor: Some(NodeInfo {
-                node_id: successor_list[0].to_bytes().to_vec(),
-                address: successor_addr,
-            }),
-            predecessor: pred_info,
-            transferred_data: Vec::new(),
-            error: String::new(),
-        }))
+            // We're not the right node to handle this join
+            Ok(Response::new(JoinResponse {
+                success: false,
+                successor: None,
+                predecessor: None,
+                transferred_data: Vec::new(),
+                error: "Not the correct position in ring".to_string(),
+            }))
+        }
     }
 
     async fn notify(
@@ -190,10 +225,19 @@ impl ChordNodeService for ChordGrpcServer {
         let node_id = NodeId::from_bytes(&predecessor.node_id);
 
         let mut pred_lock = self.config.predecessor.lock().await;
+        let current_pred = *pred_lock;
 
-        // Update predecessor if appropriate
-        if pred_lock.is_none() || node_id.is_between(&pred_lock.unwrap(), &self.node.node_id) {
+        // Update predecessor if:
+        // 1. We have no predecessor, or
+        // 2. The new node is between our current predecessor and us
+        if current_pred.is_none() || 
+           (current_pred.is_some() && node_id.is_between(&current_pred.unwrap(), &self.node.node_id)) {
             *pred_lock = Some(node_id);
+            info!("Updated predecessor to: {}", node_id);
+
+            // Store the node's address
+            let mut addresses = self.config.node_addresses.lock().await;
+            addresses.insert(node_id, predecessor.address);
         }
 
         Ok(Response::new(NotifyResponse {
@@ -233,6 +277,20 @@ impl ChordNodeService for ChordGrpcServer {
         let req = request.into_inner();
         let id = NodeId::from_bytes(&req.id);
 
+        // If we're the only node in the network, we're the successor
+        let successor_list = self.config.successor_list.lock().await;
+        if successor_list.len() == 1 && successor_list[0] == self.node.node_id {
+            return Ok(Response::new(FindSuccessorResponse {
+                successor: Some(NodeInfo {
+                    node_id: self.node.node_id.to_bytes().to_vec(),
+                    address: self.config.local_addr.clone(),
+                }),
+                success: true,
+                error: String::new(),
+            }));
+        }
+        drop(successor_list);
+
         match self.node.find_successor(id).await {
             Ok(successor) => {
                 let addr = self
@@ -250,11 +308,27 @@ impl ChordNodeService for ChordGrpcServer {
                     error: String::new(),
                 }))
             }
-            Err(e) => Ok(Response::new(FindSuccessorResponse {
-                successor: None,
-                success: false,
-                error: e.to_string(),
-            })),
+            Err(_) => {
+                // If we can't find a successor, and we're the bootstrap node,
+                // we should be the successor
+                let successor_list = self.config.successor_list.lock().await;
+                if successor_list.len() == 1 && successor_list[0] == self.node.node_id {
+                    Ok(Response::new(FindSuccessorResponse {
+                        successor: Some(NodeInfo {
+                            node_id: self.node.node_id.to_bytes().to_vec(),
+                            address: self.config.local_addr.clone(),
+                        }),
+                        success: true,
+                        error: String::new(),
+                    }))
+                } else {
+                    Ok(Response::new(FindSuccessorResponse {
+                        successor: None,
+                        success: false,
+                        error: "No successor found".to_string(),
+                    }))
+                }
+            }
         }
     }
 

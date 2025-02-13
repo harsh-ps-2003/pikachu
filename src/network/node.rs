@@ -154,38 +154,61 @@ impl ChordPeer {
     pub async fn join(&mut self, bootstrap_addr: String) -> Result<(), NetworkError> {
         info!("Attempting to join network through bootstrap node: {}", bootstrap_addr);
         
-        // Try to connect to bootstrap node once
-        match ChordGrpcClient::new(bootstrap_addr.clone()).await {
-            Ok(_) => info!("Successfully connected to bootstrap node"),
-            Err(e) => {
-                error!("Failed to connect to bootstrap node: {}", e);
-                return Err(NetworkError::Chord(ChordError::JoinFailed(format!(
-                    "Bootstrap node not available: {}", e
-                ))));
+        // Start our gRPC server first
+        self.start_grpc_server().await?;
+        
+        // Try to connect to bootstrap node with retries
+        let mut retry_count = 0;
+        const MAX_JOIN_RETRIES: u32 = 5;
+        const JOIN_RETRY_DELAY: Duration = Duration::from_secs(5);
+
+        loop {
+            match ChordGrpcClient::new(bootstrap_addr.clone()).await {
+                Ok(_) => {
+                    info!("Successfully connected to bootstrap node");
+                    break;
+                }
+                Err(e) => {
+                    retry_count += 1;
+                    if retry_count >= MAX_JOIN_RETRIES {
+                        error!("Failed to connect to bootstrap node after {} attempts: {}", MAX_JOIN_RETRIES, e);
+                        // Don't return error, just log it and continue running
+                        break;
+                    }
+                    warn!("Failed to connect to bootstrap node (attempt {}/{}): {}", retry_count, MAX_JOIN_RETRIES, e);
+                    sleep(JOIN_RETRY_DELAY).await;
+                }
             }
         }
 
-        // Start our gRPC server
-        self.start_grpc_server().await?;
+        // Try to join the Chord network
+        match self.chord_node.join_network(Some(bootstrap_addr.clone())).await {
+            Ok(_) => {
+                info!("Successfully joined Chord network");
+                
+                // Share state with worker threads
+                let thread_config = self.chord_node.get_shared_state();
 
-        // Now try to join the Chord network
-        self.chord_node
-            .join_network(Some(bootstrap_addr))
-            .await
-            .map_err(NetworkError::Chord)?;
+                // Spawn worker threads after successful join
+                tokio::spawn(run_stabilize_worker(thread_config.clone()));
+                tokio::spawn(run_predecessor_checker(thread_config.clone()));
+                tokio::spawn(run_finger_maintainer(thread_config.clone()));
+                tokio::spawn(run_successor_maintainer(thread_config.clone()));
 
-        info!("Successfully joined Chord network");
+                Ok(())
+            }
+            Err(e) => {
+                warn!("Failed to join network: {}. Node will continue running and retry joining during stabilization.", e);
+                
+                // Share state with worker threads anyway
+                let thread_config = self.chord_node.get_shared_state();
 
-        // Share state with worker threads
-        let thread_config = self.chord_node.get_shared_state();
-
-        // Spawn worker threads after successful join
-        tokio::spawn(run_stabilize_worker(thread_config.clone()));
-        tokio::spawn(run_predecessor_checker(thread_config.clone()));
-        tokio::spawn(run_finger_maintainer(thread_config.clone()));
-        tokio::spawn(run_successor_maintainer(thread_config.clone()));
-
-        Ok(())
+                // Start only stabilize worker to retry joining
+                tokio::spawn(run_stabilize_worker(thread_config.clone()));
+                
+                Ok(()) // Return Ok to keep the node running
+            }
+        }
     }
 
     pub async fn run(&mut self) -> Result<(), NetworkError> {

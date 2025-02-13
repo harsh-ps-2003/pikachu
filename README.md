@@ -11,6 +11,8 @@ To start the bootstrap node, run `cargo run start-bootstrap -p 8001`. Check whet
 
 Its not crash fault tolerant.
 
+The length of the successor/predecessor lists should be typically r=O(logN) but I have kept it a constant 3 because in a local setup, I am not going to spawn that many nodes!
+
 The core lookup logic is spread across multiple components:
 ChordNode: Maintains node state and core DHT operations
 ChordGrpcServer: Handles RPC requests for lookups
@@ -263,11 +265,14 @@ This is a very close implementation of the infamous Chord DHT with some twists :
 Thanks to the authors of these wonderful research papers for inspiring me for this personal project :
 
 * [Chord](https://pdos.csail.mit.edu/papers/chord:sigcomm01/chord_sigcomm.pdf)
+* [How to make Chord correct](https://arxiv.org/pdf/1502.06461)
+* [A Statistical Theory of Chord under Churn](https://arxiv.org/pdf/cs/0501069)
 * [Atomic Data Access in DHTs](https://groups.csail.mit.edu/tds/papers/Lynch/lncs02.pdf)
 * [Building p2p systems with Chord, a Distributed Lookup Service](https://www.cs.princeton.edu/courses/archive/spr05/cos598E/bib/dabek-chord.pdf)
 * [Towards Practical Communication in Byzantine-Resistant DHTs](https://www.cs.purdue.edu/homes/akate/publications/RobustP2P.pdf)
 * [Making Chord Robust to Byzantine Attacks](https://www.cs.unm.edu/~saia/papers/swarm.pdf)
 * [Comparing Performance of DHTs under churn](https://pdos.csail.mit.edu/~strib/docs/dhtcomparison/dhtcomparison-iptps04.pdf)
+* [Design and Analysis in Structures p2p systems](https://dcatkth.github.io/thesis/sameh_thesis.pdf)
 
 ### Future Work
 

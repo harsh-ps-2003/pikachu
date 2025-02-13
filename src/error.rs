@@ -67,6 +67,9 @@ pub enum ChordError {
 
     #[error("Operation failed: {0}")]
     OperationFailed(String),
+
+    #[error("RPC error: {0}")]
+    RpcError(String),
 }
 
 #[derive(Error, Debug)]

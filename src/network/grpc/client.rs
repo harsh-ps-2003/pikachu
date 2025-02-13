@@ -238,15 +238,10 @@ impl ChordGrpcClient {
         Ok(response.into_inner())
     }
 
-    pub async fn notify(&mut self, node_id: NodeId) -> Result<(), NetworkError> {
+    pub async fn notify(&mut self, request: NotifyRequest) -> Result<(), NetworkError> {
         let response = self
             .client
-            .notify(NotifyRequest {
-                predecessor: Some(NodeInfo {
-                    node_id: node_id.to_bytes().to_vec(),
-                    address: self.local_addr.clone(),
-                }),
-            })
+            .notify(request)
             .await
             .map_err(|e| NetworkError::PeerUnreachable(e.to_string()))?;
 
