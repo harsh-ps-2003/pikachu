@@ -12,12 +12,12 @@ use crate::network::messages::chord::{
 use futures::Stream;
 use futures::StreamExt;
 use std::pin::Pin;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tokio_stream::{self as ts};
 use tonic::transport::{Channel, Endpoint};
 use tonic::Request;
 use ts::StreamExt as _;
-use std::time::Duration;
 
 pub struct ChordGrpcClient {
     client: ChordNodeClient<Channel>,

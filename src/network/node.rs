@@ -10,18 +10,18 @@ use crate::error::*;
 use crate::network::grpc::PeerConfig;
 use crate::network::grpc::{client::ChordGrpcClient, server::ChordGrpcServer, thread::GrpcThread};
 use crate::network::messages::chord::{GetRequest, NodeInfo, PutRequest};
-use futures::{StreamExt, FutureExt};
+use futures::Future;
+use futures::{FutureExt, StreamExt};
 use log::{debug, error, info, warn};
+use std::cmp::min;
 use std::collections::HashMap;
+use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, SystemTime};
-use tokio::sync::{mpsc, oneshot};
 use tokio::select;
+use tokio::sync::{mpsc, oneshot};
 use tokio::time::sleep;
-use std::cmp::min;
-use std::pin::Pin;
-use futures::Future;
-use std::net::SocketAddr;
 
 const SERVER_STARTUP_WAIT: Duration = Duration::from_secs(2);
 const CONNECTION_RETRY_DELAY: Duration = Duration::from_millis(500);
@@ -33,7 +33,7 @@ pub struct ChordPeer {
     port: u16,
     _actor_handle: tokio::task::JoinHandle<()>, // Store actor handle to maintain lifetime
     grpc_handle: Option<tokio::task::JoinHandle<Result<(), NetworkError>>>, // Store gRPC server handle
-    shutdown_tx: Option<oneshot::Sender<()>>, // Store shutdown sender
+    shutdown_tx: Option<oneshot::Sender<()>>,                               // Store shutdown sender
 }
 
 impl ChordPeer {
@@ -77,29 +77,25 @@ impl ChordPeer {
         let (ready_tx, ready_rx) = oneshot::channel();
         let node = Arc::new(self.chord_node.clone());
         let thread_config = self.chord_node.get_shared_state();
-        
+
         // Create and start gRPC thread
-        let grpc_thread = GrpcThread::new(
-            node,
-            thread_config,
-            shutdown_rx,
-            ready_tx,
-        );
-        
+        let grpc_thread = GrpcThread::new(node, thread_config, shutdown_rx, ready_tx);
+
         info!("Starting gRPC server on 127.0.0.1:{}", self.port);
-        
-        let handle = tokio::spawn(async move {
-            grpc_thread.run().await
-        });
+
+        let handle = tokio::spawn(async move { grpc_thread.run().await });
 
         // Store both the handle and shutdown sender
         self.grpc_handle = Some(handle);
         self.shutdown_tx = Some(shutdown_tx);
-        
+
         // Wait for server to be ready with a timeout
         match tokio::time::timeout(Duration::from_secs(5), ready_rx).await {
             Ok(Ok(_)) => {
-                info!("gRPC server is ready and listening on 127.0.0.1:{}", self.port);
+                info!(
+                    "gRPC server is ready and listening on 127.0.0.1:{}",
+                    self.port
+                );
                 Ok(())
             }
             Ok(Err(_)) => {
@@ -115,7 +111,7 @@ impl ChordPeer {
 
     pub async fn create_network(&mut self) -> Result<(), NetworkError> {
         info!("Creating new Chord network...");
-        
+
         // Start gRPC server first and wait for it to be ready
         match self.start_grpc_server().await {
             Ok(_) => info!("gRPC server started successfully"),
@@ -152,11 +148,14 @@ impl ChordPeer {
     }
 
     pub async fn join(&mut self, bootstrap_addr: String) -> Result<(), NetworkError> {
-        info!("Attempting to join network through bootstrap node: {}", bootstrap_addr);
-        
+        info!(
+            "Attempting to join network through bootstrap node: {}",
+            bootstrap_addr
+        );
+
         // Start our gRPC server first
         self.start_grpc_server().await?;
-        
+
         // Try to connect to bootstrap node with retries
         let mut retry_count = 0;
         const MAX_JOIN_RETRIES: u32 = 5;
@@ -171,21 +170,31 @@ impl ChordPeer {
                 Err(e) => {
                     retry_count += 1;
                     if retry_count >= MAX_JOIN_RETRIES {
-                        error!("Failed to connect to bootstrap node after {} attempts: {}", MAX_JOIN_RETRIES, e);
+                        error!(
+                            "Failed to connect to bootstrap node after {} attempts: {}",
+                            MAX_JOIN_RETRIES, e
+                        );
                         // Don't return error, just log it and continue running
                         break;
                     }
-                    warn!("Failed to connect to bootstrap node (attempt {}/{}): {}", retry_count, MAX_JOIN_RETRIES, e);
+                    warn!(
+                        "Failed to connect to bootstrap node (attempt {}/{}): {}",
+                        retry_count, MAX_JOIN_RETRIES, e
+                    );
                     sleep(JOIN_RETRY_DELAY).await;
                 }
             }
         }
 
         // Try to join the Chord network
-        match self.chord_node.join_network(Some(bootstrap_addr.clone())).await {
+        match self
+            .chord_node
+            .join_network(Some(bootstrap_addr.clone()))
+            .await
+        {
             Ok(_) => {
                 info!("Successfully joined Chord network");
-                
+
                 // Share state with worker threads
                 let thread_config = self.chord_node.get_shared_state();
 
@@ -199,13 +208,13 @@ impl ChordPeer {
             }
             Err(e) => {
                 warn!("Failed to join network: {}. Node will continue running and retry joining during stabilization.", e);
-                
+
                 // Share state with worker threads anyway
                 let thread_config = self.chord_node.get_shared_state();
 
                 // Start only stabilize worker to retry joining
                 tokio::spawn(run_stabilize_worker(thread_config.clone()));
-                
+
                 Ok(()) // Return Ok to keep the node running
             }
         }
@@ -213,10 +222,10 @@ impl ChordPeer {
 
     pub async fn run(&mut self) -> Result<(), NetworkError> {
         info!("Starting main event loop...");
-        
+
         // Create a channel for shutdown signal
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
-        
+
         // Handle Ctrl+C
         let shutdown_tx_clone = shutdown_tx.clone();
         tokio::spawn(async move {
@@ -243,16 +252,16 @@ impl ChordPeer {
 
                         if has_other_nodes {
                             info!("Other nodes have joined the network, starting maintenance workers...");
-                            
+
                             // Share state with worker threads
                             let thread_config = self.chord_node.get_shared_state();
-                            
+
                             // Start all maintenance workers
                             tokio::spawn(run_stabilize_worker(thread_config.clone()));
                             tokio::spawn(run_predecessor_checker(thread_config.clone()));
                             tokio::spawn(run_finger_maintainer(thread_config.clone()));
                             tokio::spawn(run_successor_maintainer(thread_config.clone()));
-                            
+
                             maintenance_workers_started = true;
                             info!("Maintenance workers started successfully");
                         }
@@ -300,7 +309,11 @@ impl ChordPeer {
         for i in 0..KEY_SIZE {
             let target = self.calculate_finger_id(i);
             // Find successor for this finger
-            match self.chord_node.closest_preceding_node(&target.to_bytes()).await {
+            match self
+                .chord_node
+                .closest_preceding_node(&target.to_bytes())
+                .await
+            {
                 Some(successor) => {
                     // Update finger table
                     let mut finger_table = self.chord_node.finger_table.lock().await;
@@ -318,7 +331,7 @@ impl ChordPeer {
             .stabilize()
             .await
             .map_err(|e| NetworkError::Chord(e))?;
-        
+
         Ok(())
     }
 

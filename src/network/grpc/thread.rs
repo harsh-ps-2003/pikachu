@@ -3,12 +3,12 @@ use crate::error::NetworkError;
 use crate::network::grpc::client::ChordGrpcClient;
 use crate::network::grpc::server::ChordGrpcServer;
 use crate::network::messages::chord::chord_node_server::ChordNodeServer;
+use futures::FutureExt;
 use log::{error, info};
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::oneshot;
 use tonic::transport::Server;
-use futures::FutureExt;
-use std::time::Duration;
 
 pub struct GrpcThread {
     node: Arc<ChordNode>,
@@ -33,14 +33,19 @@ impl GrpcThread {
     }
 
     pub async fn run(mut self) -> Result<(), NetworkError> {
-        let addr = self.config.local_addr.parse()
+        let addr = self
+            .config
+            .local_addr
+            .parse()
             .map_err(|e| NetworkError::Grpc(format!("Failed to parse address: {}", e)))?;
-            
+
         info!("Starting gRPC server on {}", addr);
 
         let server = ChordGrpcServer::new(self.node.clone(), self.config.clone());
 
-        let shutdown_rx = self.shutdown_rx.take()
+        let shutdown_rx = self
+            .shutdown_rx
+            .take()
             .expect("shutdown_rx should be available");
 
         let server = Server::builder()
@@ -52,7 +57,10 @@ impl GrpcThread {
             let _ = ready_tx.send(());
         }
 
-        match server.serve_with_shutdown(addr, shutdown_rx.map(|_| ())).await {
+        match server
+            .serve_with_shutdown(addr, shutdown_rx.map(|_| ()))
+            .await
+        {
             Ok(_) => {
                 info!("gRPC server shut down gracefully");
                 Ok(())

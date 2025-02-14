@@ -1,17 +1,17 @@
 use crate::error::ChordError;
 use crate::network::grpc::client::ChordGrpcClient;
 use crate::network::messages::chord::{
-    GetRequest, HandoffRequest, HandoffResponse, KeyValue, NodeInfo, TransferKeysRequest,
-    TransferKeysResponse, NotifyRequest,
+    GetRequest, HandoffRequest, HandoffResponse, KeyValue, NodeInfo, NotifyRequest,
+    TransferKeysRequest, TransferKeysResponse,
 };
+use log::{debug, error, info, warn};
 use rand::RngCore;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::fmt;
 use std::sync::Arc;
-use tokio::sync::Mutex;
-use log::{debug, error, info, warn};
 use std::time::Duration;
+use tokio::sync::Mutex;
 use tokio::time::sleep;
 
 /*
@@ -83,7 +83,7 @@ impl NodeId {
 
         // Convert node ID to bytes
         let node_bytes = self.0;
-        
+
         // Calculate 2^k safely using checked operations
         let power = if k >= 32 {
             // For large k, directly use max u32 to avoid overflow
@@ -91,7 +91,7 @@ impl NodeId {
         } else {
             1u32.checked_shl(k as u32).unwrap_or(u32::MAX)
         };
-        
+
         let power_bytes = power.to_be_bytes();
 
         // Hash the concatenation to get (n + 2^k) mod 2^256
@@ -137,8 +137,8 @@ impl NodeId {
 
         // Start from the target byte and propagate carry if needed
         let mut carry = 0u8;
-        let idx = 31 - byte_pos;  // Start from least significant byte
-        
+        let idx = 31 - byte_pos; // Start from least significant byte
+
         // Set the bit in the correct position
         let current = result[idx];
         let bit_mask = 1u8 << bit_pos;
@@ -353,22 +353,27 @@ impl ChordNode {
         match bootstrap_addr {
             Some(addr) => {
                 info!("Joining existing network through {}", addr);
-                
+
                 // Connect to bootstrap node
-                let mut client = ChordGrpcClient::new(addr.clone())
-                    .await
-                    .map_err(|e| ChordError::JoinFailed(format!("Failed to connect to bootstrap node: {}", e)))?;
+                let mut client = ChordGrpcClient::new(addr.clone()).await.map_err(|e| {
+                    ChordError::JoinFailed(format!("Failed to connect to bootstrap node: {}", e))
+                })?;
 
                 // Find our successor through the bootstrap node
                 let successor_id = client
                     .find_successor(self.node_id.to_bytes().to_vec())
                     .await
-                    .map_err(|e| ChordError::JoinFailed(format!("Failed to find successor: {}", e)))?;
+                    .map_err(|e| {
+                        ChordError::JoinFailed(format!("Failed to find successor: {}", e))
+                    })?;
 
                 let successor_node_id = NodeId::from_bytes(&successor_id.node_id);
                 let successor_addr = successor_id.address.clone();
 
-                info!("Found successor: {} at {}", successor_node_id, successor_addr);
+                info!(
+                    "Found successor: {} at {}",
+                    successor_node_id, successor_addr
+                );
 
                 // Initialize successor list and store address
                 {
@@ -396,19 +401,22 @@ impl ChordNode {
                 }
 
                 // Notify our successor about us
-                let mut successor_client = ChordGrpcClient::new(successor_addr)
-                    .await
-                    .map_err(|e| ChordError::JoinFailed(format!("Failed to connect to successor: {}", e)))?;
+                let mut successor_client =
+                    ChordGrpcClient::new(successor_addr).await.map_err(|e| {
+                        ChordError::JoinFailed(format!("Failed to connect to successor: {}", e))
+                    })?;
 
                 successor_client
                     .notify(NotifyRequest {
                         predecessor: Some(NodeInfo {
                             node_id: self.node_id.to_bytes().to_vec(),
                             address: self.local_addr.clone(),
-                        })
+                        }),
                     })
                     .await
-                    .map_err(|e| ChordError::JoinFailed(format!("Failed to notify successor: {}", e)))?;
+                    .map_err(|e| {
+                        ChordError::JoinFailed(format!("Failed to notify successor: {}", e))
+                    })?;
 
                 info!("Successfully notified successor about our presence");
 
@@ -416,7 +424,7 @@ impl ChordNode {
             }
             None => {
                 info!("Creating new Chord network as bootstrap node");
-                
+
                 // For bootstrap node, we are our own successor and have no predecessor
                 {
                     let mut successor_list = self.successor_list.lock().await;
@@ -424,7 +432,7 @@ impl ChordNode {
                     successor_list.push(self.node_id);
                     info!("Bootstrap node set successor to self: {}", self.node_id);
                 }
-                
+
                 {
                     let mut predecessor = self.predecessor.lock().await;
                     *predecessor = None;
@@ -460,18 +468,20 @@ impl ChordNode {
         }
 
         // Get successor's address
-        let successor_addr = self.get_node_address(&successor_id).await
+        let successor_addr = self
+            .get_node_address(&successor_id)
+            .await
             .ok_or_else(|| ChordError::JoinFailed("Successor address not found".to_string()))?;
 
         // Create gRPC client for successor
-        let mut successor_client = ChordGrpcClient::new(successor_addr)
-            .await
-            .map_err(|e| ChordError::JoinFailed(format!("Failed to connect to successor: {}", e)))?;
+        let mut successor_client = ChordGrpcClient::new(successor_addr).await.map_err(|e| {
+            ChordError::JoinFailed(format!("Failed to connect to successor: {}", e))
+        })?;
 
         // Initialize remaining fingers using successor's finger table
         for i in 1..KEY_SIZE {
             let finger_start = self.node_id.get_finger_id(i);
-            
+
             // If finger start is between us and our successor, use successor
             if finger_start.is_between(&self.node_id, &successor_id) {
                 let mut finger_table = self.finger_table.lock().await;
@@ -480,11 +490,14 @@ impl ChordNode {
             }
 
             // Otherwise, find the closest preceding node for this finger
-            match successor_client.find_successor(finger_start.to_bytes().to_vec()).await {
+            match successor_client
+                .find_successor(finger_start.to_bytes().to_vec())
+                .await
+            {
                 Ok(node) => {
                     let mut finger_table = self.finger_table.lock().await;
                     finger_table.update_finger(i, NodeId::from_bytes(&node.node_id));
-                },
+                }
                 Err(_) => {
                     // If we can't find a successor, use our own successor as a fallback
                     let mut finger_table = self.finger_table.lock().await;
@@ -501,21 +514,25 @@ impl ChordNode {
         // Get our successor's ID and address
         let (successor_id, successor_addr) = {
             let finger_table = self.finger_table.lock().await;
-            let successor = finger_table.get_successor()
+            let successor = finger_table
+                .get_successor()
                 .ok_or_else(|| ChordError::JoinFailed("No successor found".into()))?;
-            
+
             let addresses = self.node_addresses.lock().await;
-            let addr = addresses.get(&successor)
-                .ok_or_else(|| ChordError::JoinFailed(format!("No address for successor {}", successor)))?
+            let addr = addresses
+                .get(&successor)
+                .ok_or_else(|| {
+                    ChordError::JoinFailed(format!("No address for successor {}", successor))
+                })?
                 .clone();
-            
+
             (successor, addr)
         };
 
         // Connect to successor
-        let mut client = ChordGrpcClient::new(successor_addr)
-            .await
-            .map_err(|e| ChordError::JoinFailed(format!("Failed to connect to successor: {}", e)))?;
+        let mut client = ChordGrpcClient::new(successor_addr).await.map_err(|e| {
+            ChordError::JoinFailed(format!("Failed to connect to successor: {}", e))
+        })?;
 
         // Request keys that should belong to us
         let transfer_request = TransferKeysRequest {

@@ -73,11 +73,9 @@ async fn main() -> Result<(), String> {
     match cli.command {
         Commands::StartBootstrap { port } => {
             info!("Initializing bootstrap node...");
-            
+
             // Create peer configuration
-            let config = PeerConfig {
-                grpc_port: port,
-            };
+            let config = PeerConfig { grpc_port: port };
 
             // Create and initialize peer
             let mut peer = ChordPeer::new(config)
@@ -96,7 +94,10 @@ async fn main() -> Result<(), String> {
 
             info!("Successfully created new network as bootstrap node");
             info!("Bootstrap node is running on: {}", node_addr);
-            info!("Other nodes can join using: cargo run join -b {} -p <PORT>", node_port);
+            info!(
+                "Other nodes can join using: cargo run join -b {} -p <PORT>",
+                node_port
+            );
 
             // Run the node until interrupted
             if let Err(e) = peer.run().await {
@@ -107,13 +108,15 @@ async fn main() -> Result<(), String> {
             info!("Bootstrap node shut down gracefully");
             Ok(())
         }
-        Commands::Join { port, bootstrap_port, host } => {
+        Commands::Join {
+            port,
+            bootstrap_port,
+            host,
+        } => {
             info!("Initializing node to join network...");
-            
+
             // Create peer configuration
-            let config = PeerConfig {
-                grpc_port: port,
-            };
+            let config = PeerConfig { grpc_port: port };
 
             // Create and initialize peer
             let mut peer = ChordPeer::new(config)
@@ -126,7 +129,10 @@ async fn main() -> Result<(), String> {
 
             // Construct bootstrap address
             let bootstrap_addr = SocketAddr::new(LOCALHOST, bootstrap_port);
-            info!("Attempting to join network through bootstrap node: {}", bootstrap_addr);
+            info!(
+                "Attempting to join network through bootstrap node: {}",
+                bootstrap_addr
+            );
 
             // Join the network using proper gRPC URL
             if let Err(e) = peer.join(to_grpc_url(bootstrap_addr)).await {

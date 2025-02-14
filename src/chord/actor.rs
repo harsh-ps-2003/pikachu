@@ -235,7 +235,7 @@ impl ChordActor {
 
     async fn notify(&mut self, node: NodeId, node_addr: String) -> Result<(), ChordError> {
         debug!("Received notify from node {}", node);
-        
+
         let mut update_predecessor = false;
         {
             let mut predecessor = self.node.predecessor.lock().await;
@@ -264,16 +264,16 @@ impl ChordActor {
             let successor_list = self.node.successor_list.lock().await;
             if successor_list.len() == 1 && successor_list[0] == self.node.node_id {
                 drop(successor_list);
-                
+
                 // Update our successor to be the new node
                 let mut successor_list = self.node.successor_list.lock().await;
                 successor_list.clear();
                 successor_list.push(node);
-                
+
                 // Update finger table to point to the new node
                 let mut finger_table = self.node.finger_table.lock().await;
                 finger_table.update_finger(0, node);
-                
+
                 debug!("Bootstrap node updated successor to {}", node);
             }
         }

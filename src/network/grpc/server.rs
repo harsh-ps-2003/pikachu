@@ -128,10 +128,7 @@ impl ChordNodeService for ChordGrpcServer {
         }))
     }
 
-    async fn join(
-        &self,
-        request: Request<JoinRequest>,
-    ) -> Result<Response<JoinResponse>, Status> {
+    async fn join(&self, request: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
         let req = request.into_inner();
         let joining_node = req
             .joining_node
@@ -140,7 +137,8 @@ impl ChordNodeService for ChordGrpcServer {
 
         // If we're the bootstrap node and alone in the network
         let mut successor_list = self.config.successor_list.lock().await;
-        let is_bootstrap_alone = successor_list.len() == 1 && successor_list[0] == self.node.node_id;
+        let is_bootstrap_alone =
+            successor_list.len() == 1 && successor_list[0] == self.node.node_id;
 
         if is_bootstrap_alone {
             // We become the joining node's successor
@@ -184,10 +182,15 @@ impl ChordNodeService for ChordGrpcServer {
             let mut addresses = self.config.node_addresses.lock().await;
             addresses.insert(node_id, joining_node.address.clone());
 
-            let successor_addr = addresses.get(&current_successor).cloned()
+            let successor_addr = addresses
+                .get(&current_successor)
+                .cloned()
                 .ok_or_else(|| Status::internal("Successor address not found"))?;
 
-            debug!("Node {} joined between {} and {}", node_id, self.node.node_id, current_successor);
+            debug!(
+                "Node {} joined between {} and {}",
+                node_id, self.node.node_id, current_successor
+            );
 
             Ok(Response::new(JoinResponse {
                 success: true,
@@ -230,8 +233,10 @@ impl ChordNodeService for ChordGrpcServer {
         // Update predecessor if:
         // 1. We have no predecessor, or
         // 2. The new node is between our current predecessor and us
-        if current_pred.is_none() || 
-           (current_pred.is_some() && node_id.is_between(&current_pred.unwrap(), &self.node.node_id)) {
+        if current_pred.is_none()
+            || (current_pred.is_some()
+                && node_id.is_between(&current_pred.unwrap(), &self.node.node_id))
+        {
             *pred_lock = Some(node_id);
             info!("Updated predecessor to: {}", node_id);
 

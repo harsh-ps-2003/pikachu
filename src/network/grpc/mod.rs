@@ -15,8 +15,6 @@ pub struct PeerConfig {
 
 impl Default for PeerConfig {
     fn default() -> Self {
-        Self {
-            grpc_port: None,
-        }
+        Self { grpc_port: None }
     }
 }
