@@ -108,14 +108,44 @@ impl NodeId {
 
     // Check if this node is between start and end in the ring
     pub fn is_between(&self, start: &NodeId, end: &NodeId) -> bool {
+        debug!(
+            "is_between check: id={}, start={}, end={}", 
+            hex::encode(&self.0[..8]),
+            hex::encode(&start.0[..8]),
+            hex::encode(&end.0[..8])
+        );
+
         if start == end {
+            debug!("start == end, returning true");
             return true;
         }
-        if start < end {
-            self > start && self <= end
+
+        let result = if start < end {
+            let in_range = self > start && self <= end;
+            debug!(
+                "Normal range check: {} < {} <= {} = {}", 
+                hex::encode(&start.0[..8]),
+                hex::encode(&self.0[..8]),
+                hex::encode(&end.0[..8]),
+                in_range
+            );
+            in_range
         } else {
-            self > start || self <= end
-        }
+            // Handle wrap-around case
+            let in_range = self > start || self <= end;
+            debug!(
+                "Wrap-around check: {} > {} || {} <= {} = {}", 
+                hex::encode(&self.0[..8]),
+                hex::encode(&start.0[..8]),
+                hex::encode(&self.0[..8]),
+                hex::encode(&end.0[..8]),
+                in_range
+            );
+            in_range
+        };
+
+        debug!("is_between final result: {}", result);
+        result
     }
 
     // Get the n-th finger (n is 0-based)

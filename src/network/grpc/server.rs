@@ -227,21 +227,41 @@ impl ChordNodeService for ChordGrpcServer {
             .ok_or_else(|| Status::invalid_argument("Missing predecessor info"))?;
         let node_id = NodeId::from_bytes(&predecessor.node_id);
 
+        debug!(
+            "Received notify from node {} (local node: {})",
+            node_id, self.node.node_id
+        );
+
         let mut pred_lock = self.config.predecessor.lock().await;
         let current_pred = *pred_lock;
+
+        debug!(
+            "Current state - predecessor: {:?}, local node: {}", 
+            current_pred, 
+            self.node.node_id
+        );
 
         // Update predecessor if:
         // 1. We have no predecessor, or
         // 2. The new node is between our current predecessor and us
-        if current_pred.is_none()
-            || (current_pred.is_some()
-                && node_id.is_between(&current_pred.unwrap(), &self.node.node_id))
-        {
-            info!(
+        let should_update = if current_pred.is_none() {
+            debug!("No current predecessor, will accept new predecessor");
+            true
+        } else if let Some(curr_pred) = current_pred {
+            let is_between = node_id.is_between(&curr_pred, &self.node.node_id);
+            debug!(
+                "Checking if {} is between current predecessor {} and local node {}: {}",
+                node_id, curr_pred, self.node.node_id, is_between
+            );
+            is_between
+        } else {
+            false
+        };
+
+        if should_update {
+            debug!(
                 "Updating predecessor: {:?} -> {} (node: {})",
-                current_pred,
-                node_id,
-                self.node.node_id
+                current_pred, node_id, self.node.node_id
             );
             
             *pred_lock = Some(node_id);
@@ -250,30 +270,29 @@ impl ChordNodeService for ChordGrpcServer {
             let mut addresses = self.config.node_addresses.lock().await;
             addresses.insert(node_id, predecessor.address.clone());
             
-            info!(
-                "Node {} state after predecessor update:",
-                self.node.node_id
-            );
-            info!("  - Predecessor: {}", node_id);
-            info!("  - Address: {}", predecessor.address);
+            debug!("Node {} state after predecessor update:", self.node.node_id);
+            debug!("  - Predecessor: {}", node_id);
+            debug!("  - Address: {}", predecessor.address);
             
             // Log successor information for context
             let successor_list = self.config.successor_list.lock().await;
             if let Some(succ) = successor_list.first() {
-                info!("  - Successor: {}", succ);
+                debug!("  - Successor: {}", succ);
             }
         } else {
             debug!(
                 "Rejected predecessor update: current={:?}, proposed={} (node: {})",
-                current_pred,
-                node_id,
-                self.node.node_id
+                current_pred, node_id, self.node.node_id
             );
         }
 
         Ok(Response::new(NotifyResponse {
-            accepted: true,
-            error: String::new(),
+            accepted: should_update,
+            error: if !should_update {
+                "Predecessor update rejected".to_string()
+            } else {
+                String::new()
+            },
         }))
     }
 
