@@ -1,5 +1,10 @@
 use clap::{Parser, Subcommand};
-use log::{error, info, warn};
+use log::{error, info, warn, LevelFilter};
+use log4rs::{
+    append::file::FileAppender,
+    config::{Appender, Config, Root},
+    encode::pattern::PatternEncoder,
+};
 use pikachu::{
     chord::{
         types::{
@@ -26,6 +31,26 @@ const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
 /// Helper function to convert SocketAddr to gRPC URL
 fn to_grpc_url(addr: SocketAddr) -> String {
     format!("http://{}", addr)
+}
+
+/// Setup file-based logging with the given port number
+fn setup_logging(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    let log_file = format!("{}.log", port);
+    
+    // Create a file appender
+    let file_appender = FileAppender::builder()
+        .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S%.3f)} {l} {t} - {m}{n}")))
+        .build(log_file)?;
+
+    // Build the logger configuration
+    let config = Config::builder()
+        .appender(Appender::builder().build("file", Box::new(file_appender)))
+        .build(Root::builder().appender("file").build(LevelFilter::Debug))?;
+
+    // Initialize the logger
+    log4rs::init_config(config)?;
+
+    Ok(())
 }
 
 #[derive(Parser)]
@@ -63,17 +88,10 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
-    // Initialize logging with timestamp
-    env_logger::Builder::from_default_env()
-        .format_timestamp_millis()
-        .init();
-
     let cli = Cli::parse();
 
     match cli.command {
         Commands::StartBootstrap { port } => {
-            info!("Initializing bootstrap node...");
-
             // Create peer configuration
             let config = PeerConfig { grpc_port: port };
 
@@ -83,6 +101,10 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
             let node_port = peer.get_port();
+            
+            // Setup logging for this node
+            setup_logging(node_port).map_err(|e| format!("Failed to setup logging: {}", e))?;
+            
             let node_addr = SocketAddr::new(LOCALHOST, node_port);
             info!("Starting bootstrap node on {}", node_addr);
 
@@ -113,8 +135,6 @@ async fn main() -> Result<(), String> {
             bootstrap_port,
             host,
         } => {
-            info!("Initializing node to join network...");
-
             // Create peer configuration
             let config = PeerConfig { grpc_port: port };
 
@@ -124,6 +144,10 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
             let node_port = peer.get_port();
+            
+            // Setup logging for this node
+            setup_logging(node_port).map_err(|e| format!("Failed to setup logging: {}", e))?;
+            
             let node_addr = SocketAddr::new(LOCALHOST, node_port);
             info!("Starting node on {}", node_addr);
 

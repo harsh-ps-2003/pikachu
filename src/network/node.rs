@@ -294,14 +294,14 @@ impl ChordPeer {
     }
 
     async fn stabilize(&mut self) -> Result<(), NetworkError> {
-        // For bootstrap node, if we don't have any successors yet, skip stabilization
-        let has_successors = {
-            let finger_table = self.chord_node.finger_table.lock().await;
-            finger_table.has_successors()
+        // For bootstrap node, check if we have any successors other than ourselves
+        let has_other_successors = {
+            let successor_list = self.chord_node.successor_list.lock().await;
+            successor_list.iter().any(|&s| s != self.chord_node.node_id)
         };
 
-        if !has_successors {
-            debug!("No successors yet, skipping stabilization (normal for bootstrap node)");
+        if !has_other_successors {
+            debug!("No other nodes in successor list yet, skipping stabilization");
             return Ok(());
         }
 

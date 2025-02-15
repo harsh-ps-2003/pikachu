@@ -5,7 +5,9 @@ A multi-dimensional asynchronous Byzantine Fault Tolerant non-persistent in-memo
 ### Demo
 
 To start the bootstrap node, run `cargo run start-bootstrap -p 8001`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node -
-`lsof -i :8001`.
+`lsof -i :8001`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p 8002`. The nodes will automatically detect each other, and start forming the chord network.
+
+And when you only spawn 2/3 nodes, you will see a lot of failing routing table updates. Chord requires a sufficient number of nodes, spread across the ID space, to populate the finger tables effectively. With only one node, most find_successor calls will fail because there's no other node to point to. With two nodes, you'll have some entries, but many will still be missing. Don't worry :)
 
 ### System Design
 
