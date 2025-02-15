@@ -1,5 +1,4 @@
 pub mod actor;
-pub mod routing;
 pub mod types;
 pub mod workers;
 

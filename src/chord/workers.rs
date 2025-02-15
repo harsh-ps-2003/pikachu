@@ -562,12 +562,44 @@ pub async fn run_successor_maintainer(config: ThreadConfig) {
     }
 }
 
+/// Periodically logs the complete finger table state
+pub async fn run_finger_table_logger(config: ThreadConfig) {
+    info!("Starting finger table logger worker");
+    let mut interval = tokio::time::interval(Duration::from_secs(30));
+
+    loop {
+        interval.tick().await;
+        log_finger_table_state(&config).await;
+    }
+}
+
+async fn log_finger_table_state(config: &ThreadConfig) {
+    let finger_table = config.finger_table.lock().await;
+    let predecessor = config.predecessor.lock().await;
+    let successor_list = config.successor_list.lock().await;
+    
+    info!("=== Node {} State ===", config.local_node_id);
+    info!("Predecessor: {:?}", *predecessor);
+    info!("Successor List: {:?}", *successor_list);
+    info!("Finger Table:");
+    
+    for (i, entry) in finger_table.entries.iter().enumerate() {
+        if let Some(node) = entry.node {
+            info!("  Finger {}: {} -> {}", i, entry.start, node);
+        }
+    }
+    info!("===================");
+}
+
 async fn check_predecessor(config: &ThreadConfig) {
     let pred_id = {
         let pred = config.predecessor.lock().await;
         match *pred {
             Some(id) => id,
-            None => return,
+            None => {
+                debug!("No predecessor set, skipping predecessor check");
+                return;
+            }
         }
     };
 
@@ -591,6 +623,8 @@ async fn check_predecessor(config: &ThreadConfig) {
             pred_id
         );
         let mut predecessor = config.predecessor.lock().await;
+        let old_pred = *predecessor;
         *predecessor = None;
+        info!("Predecessor updated: {:?} -> None (due to failure)", old_pred);
     }
 }

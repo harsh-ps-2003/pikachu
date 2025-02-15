@@ -237,12 +237,38 @@ impl ChordNodeService for ChordGrpcServer {
             || (current_pred.is_some()
                 && node_id.is_between(&current_pred.unwrap(), &self.node.node_id))
         {
+            info!(
+                "Updating predecessor: {:?} -> {} (node: {})",
+                current_pred,
+                node_id,
+                self.node.node_id
+            );
+            
             *pred_lock = Some(node_id);
-            info!("Updated predecessor to: {}", node_id);
 
             // Store the node's address
             let mut addresses = self.config.node_addresses.lock().await;
-            addresses.insert(node_id, predecessor.address);
+            addresses.insert(node_id, predecessor.address.clone());
+            
+            info!(
+                "Node {} state after predecessor update:",
+                self.node.node_id
+            );
+            info!("  - Predecessor: {}", node_id);
+            info!("  - Address: {}", predecessor.address);
+            
+            // Log successor information for context
+            let successor_list = self.config.successor_list.lock().await;
+            if let Some(succ) = successor_list.first() {
+                info!("  - Successor: {}", succ);
+            }
+        } else {
+            debug!(
+                "Rejected predecessor update: current={:?}, proposed={} (node: {})",
+                current_pred,
+                node_id,
+                self.node.node_id
+            );
         }
 
         Ok(Response::new(NotifyResponse {

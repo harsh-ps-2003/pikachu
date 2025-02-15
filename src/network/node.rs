@@ -2,7 +2,7 @@ use crate::chord::actor::{ChordActor, ChordHandle, ChordMessage};
 use crate::chord::{
     types::{ChordNode, Key, NodeId, Value, KEY_SIZE},
     workers::{
-        run_finger_maintainer, run_predecessor_checker, run_stabilize_worker,
+        run_finger_maintainer, run_finger_table_logger, run_predecessor_checker, run_stabilize_worker,
         run_successor_maintainer,
     },
 };
@@ -221,75 +221,50 @@ impl ChordPeer {
     }
 
     pub async fn run(&mut self) -> Result<(), NetworkError> {
-        info!("Starting main event loop...");
+        info!("Starting Chord node workers...");
 
-        // Create a channel for shutdown signal
-        let (shutdown_tx, mut shutdown_rx) = tokio::sync::mpsc::channel::<()>(1);
+        let config = self.chord_node.get_shared_state();
+        
+        // Spawn worker threads
+        let stabilize_handle = tokio::spawn(run_stabilize_worker(config.clone()));
+        let finger_maintainer_handle = tokio::spawn(run_finger_maintainer(config.clone()));
+        let predecessor_checker_handle = tokio::spawn(run_predecessor_checker(config.clone()));
+        let successor_maintainer_handle = tokio::spawn(run_successor_maintainer(config.clone()));
+        let finger_logger_handle = tokio::spawn(run_finger_table_logger(config.clone()));
 
-        // Handle Ctrl+C
-        let shutdown_tx_clone = shutdown_tx.clone();
-        tokio::spawn(async move {
-            if let Ok(_) = tokio::signal::ctrl_c().await {
+        // Wait for shutdown signal
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => {
                 info!("Received shutdown signal");
-                let _ = shutdown_tx_clone.send(()).await;
             }
-        });
-
-        // For bootstrap node, we need to monitor when other nodes join
-        let mut maintenance_workers_started = false;
-        let mut check_interval = tokio::time::interval(Duration::from_secs(5));
-
-        // Main event loop
-        loop {
-            tokio::select! {
-                _ = check_interval.tick() => {
-                    // Check if we need to start maintenance workers
-                    if !maintenance_workers_started {
-                        let has_other_nodes = {
-                            let addresses = self.chord_node.node_addresses.lock().await;
-                            addresses.len() > 1
-                        };
-
-                        if has_other_nodes {
-                            info!("Other nodes have joined the network, starting maintenance workers...");
-
-                            // Share state with worker threads
-                            let thread_config = self.chord_node.get_shared_state();
-
-                            // Start all maintenance workers
-                            tokio::spawn(run_stabilize_worker(thread_config.clone()));
-                            tokio::spawn(run_predecessor_checker(thread_config.clone()));
-                            tokio::spawn(run_finger_maintainer(thread_config.clone()));
-                            tokio::spawn(run_successor_maintainer(thread_config.clone()));
-
-                            maintenance_workers_started = true;
-                            info!("Maintenance workers started successfully");
-                        }
-                    }
-
-                    // Only run stabilization if maintenance workers are active
-                    if maintenance_workers_started {
-                        if let Err(e) = self.stabilize().await {
-                            error!("Stabilization error: {}", e);
-                        }
-                    }
+            err = stabilize_handle => {
+                if let Err(e) = err {
+                    error!("Stabilize worker failed: {}", e);
                 }
-                Some(_) = shutdown_rx.recv() => {
-                    info!("Shutting down node...");
-                    // Send shutdown signal to gRPC server
-                    if let Some(tx) = self.shutdown_tx.take() {
-                        let _ = tx.send(());
-                        // Wait for gRPC server to shut down
-                        if let Some(handle) = self.grpc_handle.take() {
-                            let _ = handle.await;
-                        }
-                    }
-                    break;
+            }
+            err = finger_maintainer_handle => {
+                if let Err(e) = err {
+                    error!("Finger maintainer failed: {}", e);
+                }
+            }
+            err = predecessor_checker_handle => {
+                if let Err(e) = err {
+                    error!("Predecessor checker failed: {}", e);
+                }
+            }
+            err = successor_maintainer_handle => {
+                if let Err(e) = err {
+                    error!("Successor maintainer failed: {}", e);
+                }
+            }
+            err = finger_logger_handle => {
+                if let Err(e) = err {
+                    error!("Finger table logger failed: {}", e);
                 }
             }
         }
 
-        info!("Node shutdown complete");
+        info!("Shutting down node...");
         Ok(())
     }
 

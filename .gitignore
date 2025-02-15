@@ -1,2 +1,18 @@
 /target
+
+# Chord messages
 !src/network/messages/chord.rs
+
+# Log files
+*.log
+logs/
+
+# JSON files
+*.json
+!.vscode/*.json
+
+# XML files
+*.xml
+
+# Cargo lock file
+Cargo.lock
