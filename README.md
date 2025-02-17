@@ -1,13 +1,14 @@
 # Pikachu 
 
-A multi-dimensional asynchronous Byzantine Fault Tolerant non-persistent in-memory Distributed Hash Table implementation.
+An asynchronous multi-dimensional non-persistent in-memory Byzantine Fault Tolerant Distributed Hash Table implementation.
 
 ### Demo
 
-To start the bootstrap node, run `cargo run start-bootstrap -p 8001`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node -
-`lsof -i :8001`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p 8002`. The nodes will automatically detect each other, and start forming the chord network. Just `^C` for graceful shutdown of node, and then close the terminal instance.
+To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p <NODE_PORT>`. The nodes will automatically detect each other, and start forming the chord network. Take a look at `<NODE_PORT>.log` files for the logs. Just `^C` for graceful shutdown of node, and then close the terminal instance.
 
 And when you only spawn 2/3 nodes, you will see a lot of failing routing table updates. Chord requires a sufficient number of nodes, spread across the ID space, to populate the finger tables effectively. With only one node, most find_successor calls will fail because there's no other node to point to. With two nodes, you'll have some entries, but many will still be missing. Don't worry :)
+
+And yes, aren't there too many logs when you use `RUST_LOG=debug` with the command!
 
 ### System Design
 
@@ -63,13 +64,13 @@ Thanks to the authors of these wonderful research papers for inspiring me for th
 * [How to make Chord correct](https://arxiv.org/pdf/1502.06461)
 * [A Statistical Theory of Chord under Churn](https://arxiv.org/pdf/cs/0501069)
 * [Atomic Data Access in DHTs](https://groups.csail.mit.edu/tds/papers/Lynch/lncs02.pdf)
-* [Building p2p systems with Chord, a Distributed Lookup Service](https://www.cs.princeton.edu/courses/archive/spr05/cos598E/bib/dabek-chord.pdf)
-* [Towards Practical Communication in Byzantine-Resistant DHTs](https://www.cs.purdue.edu/homes/akate/publications/RobustP2P.pdf)
 * [Making Chord Robust to Byzantine Attacks](https://www.cs.unm.edu/~saia/papers/swarm.pdf)
+* [Towards Practical Communication in Byzantine-Resistant DHTs](https://www.cs.purdue.edu/homes/akate/publications/RobustP2P.pdf)
+* [Building p2p systems with Chord, a Distributed Lookup Service](https://www.cs.princeton.edu/courses/archive/spr05/cos598E/bib/dabek-chord.pdf)
 * [Comparing Performance of DHTs under churn](https://pdos.csail.mit.edu/~strib/docs/dhtcomparison/dhtcomparison-iptps04.pdf)
 * [Design and Analysis in Structures p2p systems](https://dcatkth.github.io/thesis/sameh_thesis.pdf)
 
-### Future Work
+### Some Improvements...
 
 Some cool things that can be further done :
 
@@ -77,6 +78,7 @@ Some cool things that can be further done :
 * Make this BFT DHT privacy-preserving as well - [Add Query Privacy to Robust DHTs](https://arxiv.org/pdf/1107.1072)
 That would be cool :)
 * Sybil attacks could poison the network as nodes can join without authentication
+* Adding some testcontainer property tests would be cool!
 
 ### Disclaimer 
 

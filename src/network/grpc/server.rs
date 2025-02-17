@@ -236,9 +236,8 @@ impl ChordNodeService for ChordGrpcServer {
         let current_pred = *pred_lock;
 
         debug!(
-            "Current state - predecessor: {:?}, local node: {}", 
-            current_pred, 
-            self.node.node_id
+            "Current state - predecessor: {:?}, local node: {}",
+            current_pred, self.node.node_id
         );
 
         // Update predecessor if:
@@ -263,17 +262,17 @@ impl ChordNodeService for ChordGrpcServer {
                 "Updating predecessor: {:?} -> {} (node: {})",
                 current_pred, node_id, self.node.node_id
             );
-            
+
             *pred_lock = Some(node_id);
 
             // Store the node's address
             let mut addresses = self.config.node_addresses.lock().await;
             addresses.insert(node_id, predecessor.address.clone());
-            
+
             debug!("Node {} state after predecessor update:", self.node.node_id);
             debug!("  - Predecessor: {}", node_id);
             debug!("  - Address: {}", predecessor.address);
-            
+
             // Log successor information for context
             let successor_list = self.config.successor_list.lock().await;
             if let Some(succ) = successor_list.first() {

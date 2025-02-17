@@ -24,6 +24,7 @@ use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::str::FromStr;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::env;
 
 // Define localhost constant
 const LOCALHOST: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
@@ -36,16 +37,30 @@ fn to_grpc_url(addr: SocketAddr) -> String {
 /// Setup file-based logging with the given port number
 fn setup_logging(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let log_file = format!("{}.log", port);
-    
+
+    // Get log level from RUST_LOG env var, default to Info if not set
+    let log_level = env::var("RUST_LOG")
+        .map(|level| match level.to_lowercase().as_str() {
+            "error" => LevelFilter::Error,
+            "warn" => LevelFilter::Warn,
+            "info" => LevelFilter::Info,
+            "debug" => LevelFilter::Debug,
+            "trace" => LevelFilter::Trace,
+            _ => LevelFilter::Info,
+        })
+        .unwrap_or(LevelFilter::Info);
+
     // Create a file appender
     let file_appender = FileAppender::builder()
-        .encoder(Box::new(PatternEncoder::new("{d(%Y-%m-%d %H:%M:%S%.3f)} {l} {t} - {m}{n}")))
+        .encoder(Box::new(PatternEncoder::new(
+            "{d(%Y-%m-%d %H:%M:%S%.3f)} {l} {t} - {m}{n}",
+        )))
         .build(log_file)?;
 
     // Build the logger configuration
     let config = Config::builder()
         .appender(Appender::builder().build("file", Box::new(file_appender)))
-        .build(Root::builder().appender("file").build(LevelFilter::Debug))?;
+        .build(Root::builder().appender("file").build(log_level))?;
 
     // Initialize the logger
     log4rs::init_config(config)?;
@@ -101,10 +116,10 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
             let node_port = peer.get_port();
-            
+
             // Setup logging for this node
             setup_logging(node_port).map_err(|e| format!("Failed to setup logging: {}", e))?;
-            
+
             let node_addr = SocketAddr::new(LOCALHOST, node_port);
             info!("Starting bootstrap node on {}", node_addr);
 
@@ -144,10 +159,10 @@ async fn main() -> Result<(), String> {
                 .map_err(|e| format!("Failed to create peer: {}", e))?;
 
             let node_port = peer.get_port();
-            
+
             // Setup logging for this node
             setup_logging(node_port).map_err(|e| format!("Failed to setup logging: {}", e))?;
-            
+
             let node_addr = SocketAddr::new(LOCALHOST, node_port);
             info!("Starting node on {}", node_addr);
 

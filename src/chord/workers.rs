@@ -80,7 +80,7 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
             let pred = config.predecessor.lock().await;
             pred.clone()
         };
-        
+
         if let Some(pred_id) = pred {
             if let Some(pred_addr) = config.get_node_addr(&pred_id).await {
                 // Verify predecessor is still alive
@@ -105,7 +105,10 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
             // If we can't get successor's address, clear it and try again next time
             let mut successor_list = config.successor_list.lock().await;
             successor_list.clear();
-            return Err(ChordError::NodeNotFound(format!("Address not found for successor {}", successor)));
+            return Err(ChordError::NodeNotFound(format!(
+                "Address not found for successor {}",
+                successor
+            )));
         }
     };
 
@@ -116,7 +119,10 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
             // If we can't connect to successor, clear it and try again next time
             let mut successor_list = config.successor_list.lock().await;
             successor_list.clear();
-            return Err(ChordError::StabilizationFailed(format!("Failed to connect to successor: {}", e)));
+            return Err(ChordError::StabilizationFailed(format!(
+                "Failed to connect to successor: {}",
+                e
+            )));
         }
     };
 
@@ -130,14 +136,17 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
                     config.add_node_addr(pred_id, pred_info.address).await;
                     Some(pred_id)
                 }
-                None => None
+                None => None,
             }
         }
         Err(e) => {
             // If we can't get predecessor, assume successor has failed
             let mut successor_list = config.successor_list.lock().await;
             successor_list.retain(|&x| x != successor);
-            return Err(ChordError::StabilizationFailed(format!("Failed to get predecessor from successor: {}", e)));
+            return Err(ChordError::StabilizationFailed(format!(
+                "Failed to get predecessor from successor: {}",
+                e
+            )));
         }
     };
 
@@ -155,12 +164,15 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
                             successor_list.push(x);
                         }
 
-                        info!("Updated successor from {} to {} during stabilization", successor, x);
+                        info!(
+                            "Updated successor from {} to {} during stabilization",
+                            successor, x
+                        );
 
                         // Update successor list
                         update_successor_list(config, x).await?;
                         debug!("Successfully stabilized with new successor {}", x);
-                        
+
                         // Notify the new successor
                         if let Ok(mut client) = ChordGrpcClient::new(x_addr).await {
                             let notify_request = NotifyRequest {
@@ -173,7 +185,7 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
                                 warn!("Failed to notify new successor: {}", e);
                             }
                         }
-                        
+
                         return Ok(());
                     }
                 }
@@ -197,13 +209,16 @@ async fn stabilize(config: &ThreadConfig) -> Result<(), ChordError> {
     // Update successor list with current successor
     update_successor_list(config, successor).await?;
 
-    debug!("Successfully stabilized with immediate successor {}", successor);
+    debug!(
+        "Successfully stabilized with immediate successor {}",
+        successor
+    );
     Ok(())
 }
 
 async fn update_successor_list(config: &ThreadConfig, successor: NodeId) -> Result<(), ChordError> {
     let mut successor_list = config.successor_list.lock().await;
-    
+
     // Clear and add new successor
     successor_list.clear();
     successor_list.push(successor);
@@ -216,9 +231,9 @@ async fn update_successor_list(config: &ThreadConfig, successor: NodeId) -> Resu
                     // Add successors from the received list, maintaining order
                     for node_info in list {
                         let node = NodeId::from_bytes(&node_info.node_id);
-                        if node != config.local_node_id 
-                           && !successor_list.contains(&node)
-                           && successor_list.len() < MAX_SUCCESSOR_LIST_SIZE 
+                        if node != config.local_node_id
+                            && !successor_list.contains(&node)
+                            && successor_list.len() < MAX_SUCCESSOR_LIST_SIZE
                         {
                             successor_list.push(node);
                             // Store the address
@@ -412,7 +427,10 @@ async fn fix_finger(config: &ThreadConfig, index: usize) -> Result<(), ChordErro
     };
 
     let Some(immediate_successor) = successor else {
-        debug!("No immediate successor available for finger {}, will retry later", index);
+        debug!(
+            "No immediate successor available for finger {}, will retry later",
+            index
+        );
         return Ok(());
     };
 
@@ -428,7 +446,10 @@ async fn fix_finger(config: &ThreadConfig, index: usize) -> Result<(), ChordErro
     if index == 0 {
         let mut finger_table = config.finger_table.lock().await;
         finger_table.update_finger(0, immediate_successor);
-        debug!("Updated first finger to immediate successor {}", immediate_successor);
+        debug!(
+            "Updated first finger to immediate successor {}",
+            immediate_successor
+        );
         return Ok(());
     }
 
@@ -436,7 +457,10 @@ async fn fix_finger(config: &ThreadConfig, index: usize) -> Result<(), ChordErro
     if finger_start.is_between(&node_id, &immediate_successor) {
         let mut finger_table = config.finger_table.lock().await;
         finger_table.update_finger(index, immediate_successor);
-        debug!("Updated finger {} to immediate successor {}", index, immediate_successor);
+        debug!(
+            "Updated finger {} to immediate successor {}",
+            index, immediate_successor
+        );
         return Ok(());
     }
 
@@ -459,18 +483,23 @@ async fn fix_finger(config: &ThreadConfig, index: usize) -> Result<(), ChordErro
         if let Some(addr) = config.get_node_addr(&closest_preceding).await {
             match ChordGrpcClient::new(addr).await {
                 Ok(mut client) => {
-                    match client.find_successor(finger_start.to_bytes().to_vec()).await {
+                    match client
+                        .find_successor(finger_start.to_bytes().to_vec())
+                        .await
+                    {
                         Ok(node_info) => {
                             let successor_id = NodeId::from_bytes(&node_info.node_id);
-                            
+
                             // Cache the address for future use
                             config.add_node_addr(successor_id, node_info.address).await;
-                            
+
                             let mut finger_table = config.finger_table.lock().await;
                             finger_table.update_finger(index, successor_id);
-                            
-                            debug!("Updated finger {} to successor {} via closest preceding node {}", 
-                                  index, successor_id, closest_preceding);
+
+                            debug!(
+                                "Updated finger {} to successor {} via closest preceding node {}",
+                                index, successor_id, closest_preceding
+                            );
                             return Ok(());
                         }
                         Err(e) => {
@@ -490,7 +519,10 @@ async fn fix_finger(config: &ThreadConfig, index: usize) -> Result<(), ChordErro
     // If all else fails, use immediate successor as fallback
     let mut finger_table = config.finger_table.lock().await;
     finger_table.update_finger(index, immediate_successor);
-    debug!("Using immediate successor {} as fallback for finger {}", immediate_successor, index);
+    debug!(
+        "Using immediate successor {} as fallback for finger {}",
+        immediate_successor, index
+    );
 
     Ok(())
 }
@@ -577,12 +609,12 @@ async fn log_finger_table_state(config: &ThreadConfig) {
     let finger_table = config.finger_table.lock().await;
     let predecessor = config.predecessor.lock().await;
     let successor_list = config.successor_list.lock().await;
-    
+
     info!("=== Node {} State ===", config.local_node_id);
     info!("Predecessor: {:?}", *predecessor);
     info!("Successor List: {:?}", *successor_list);
     info!("Finger Table:");
-    
+
     for (i, entry) in finger_table.entries.iter().enumerate() {
         if let Some(node) = entry.node {
             info!("  Finger {}: {} -> {}", i, entry.start, node);
@@ -625,6 +657,9 @@ async fn check_predecessor(config: &ThreadConfig) {
         let mut predecessor = config.predecessor.lock().await;
         let old_pred = *predecessor;
         *predecessor = None;
-        info!("Predecessor updated: {:?} -> None (due to failure)", old_pred);
+        info!(
+            "Predecessor updated: {:?} -> None (due to failure)",
+            old_pred
+        );
     }
 }

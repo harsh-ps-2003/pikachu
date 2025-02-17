@@ -2,8 +2,8 @@ use crate::chord::actor::{ChordActor, ChordHandle, ChordMessage};
 use crate::chord::{
     types::{ChordNode, Key, NodeId, Value, KEY_SIZE},
     workers::{
-        run_finger_maintainer, run_finger_table_logger, run_predecessor_checker, run_stabilize_worker,
-        run_successor_maintainer,
+        run_finger_maintainer, run_finger_table_logger, run_predecessor_checker,
+        run_stabilize_worker, run_successor_maintainer,
     },
 };
 use crate::error::*;
@@ -224,7 +224,7 @@ impl ChordPeer {
         info!("Starting Chord node workers...");
 
         let config = self.chord_node.get_shared_state();
-        
+
         // Spawn worker threads
         let stabilize_handle = tokio::spawn(run_stabilize_worker(config.clone()));
         let finger_maintainer_handle = tokio::spawn(run_finger_maintainer(config.clone()));

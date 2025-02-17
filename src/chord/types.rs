@@ -109,7 +109,7 @@ impl NodeId {
     // Check if this node is between start and end in the ring
     pub fn is_between(&self, start: &NodeId, end: &NodeId) -> bool {
         debug!(
-            "is_between check: id={}, start={}, end={}", 
+            "is_between check: id={}, start={}, end={}",
             hex::encode(&self.0[..8]),
             hex::encode(&start.0[..8]),
             hex::encode(&end.0[..8])
@@ -123,7 +123,7 @@ impl NodeId {
         let result = if start < end {
             let in_range = self > start && self <= end;
             debug!(
-                "Normal range check: {} < {} <= {} = {}", 
+                "Normal range check: {} < {} <= {} = {}",
                 hex::encode(&start.0[..8]),
                 hex::encode(&self.0[..8]),
                 hex::encode(&end.0[..8]),
@@ -134,7 +134,7 @@ impl NodeId {
             // Handle wrap-around case
             let in_range = self > start || self <= end;
             debug!(
-                "Wrap-around check: {} > {} || {} <= {} = {}", 
+                "Wrap-around check: {} > {} || {} <= {} = {}",
                 hex::encode(&self.0[..8]),
                 hex::encode(&start.0[..8]),
                 hex::encode(&self.0[..8]),

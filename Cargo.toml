@@ -40,5 +40,5 @@ panic = "abort"
 inherits = "release"
 debug = false       # Disable debug symbols
 lto = "off"         # Disable Link-Time Optimization (LTO)
-codegen-units = 16  # Increase parallelism
+codegen-units = 32  # Increase parallelism
 incremental = false # Disable incremental compilation for clean builds

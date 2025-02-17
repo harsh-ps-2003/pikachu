@@ -1,0 +1,13 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "type": "lldb",
+            "request": "launch",
+            "name": "Debug Pikachu",
+            "program": "${workspaceFolder}/target/debug/pikachu",
+            "args": ["start-bootstrap", "-p", "8001"],
+            "cwd": "${workspaceFolder}",
+        }
+    ]
+}
