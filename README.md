@@ -4,9 +4,13 @@ An asynchronous multi-dimensional non-persistent in-memory Byzantine Fault Toler
 
 ### Demo
 
-To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p <NODE_PORT>`. The nodes will automatically detect each other, and start forming the chord network. Take a look at `<NODE_PORT>.log` files for the logs. Just `^C` for graceful shutdown of node, and then close the terminal instance.
+To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p <NODE_PORT>`. The nodes will automatically detect each other, and start forming the chord network. Take a look at `<NODE_PORT>.log` files for the logs. 
 
-And when you only spawn 2/3 nodes, you will see a lot of failing routing table updates. Chord requires a sufficient number of nodes, spread across the ID space, to populate the finger tables effectively. With only one node, most find_successor calls will fail because there's no other node to point to. With two nodes, you'll have some entries, but many will still be missing. Don't worry :)
+To put the key-value pair in the DHT use `cargo run -p <NODE_PORT> -k <KEY> -v <VALUE>` and similarly to get it back from DHT use `cargo run get -p <NODE_PORT> -k <KEY>`.
+
+Just `^C` for graceful shutdown of node, and then close the terminal instance.
+
+And when you only spawn 2/3 nodes, you will see a lot of failing routing table updates. Chord requires a sufficient number of nodes, spread across the ID space, to populate the finger tables effectively. With only one node, most `find_successor` calls will fail because there's no other node to point to. With two nodes, you'll have some entries, but many will still be missing. Don't worry :)
 
 And yes, aren't there too many logs when you use `RUST_LOG=debug` with the command!
 
@@ -50,11 +54,7 @@ Disadvantages
 
 ### Something extra...
 
-This is a very close implementation of the infamous Chord DHT with some twists :
-
-* It's BFT now :)
-* Traditional Chord doesn't specify any encryption, leaving communication vulnerable to man-in-the-middle attacks or data tampering. Noise Protocol Framework has been used to tackle this which automatically handles peer authentication, reducing the risk of Sybil attacks
-* [mDNS](https://datatracker.ietf.org/doc/html/rfc6762) has been used for local peer discovery
+This is a very close implementation of the infamous Chord DHT with a twist, I have made it BFT using SMPC protocol.
 
 ### Reference
 
@@ -78,7 +78,7 @@ Some cool things that can be further done :
 * Make this BFT DHT privacy-preserving as well - [Add Query Privacy to Robust DHTs](https://arxiv.org/pdf/1107.1072)
 That would be cool :)
 * Sybil attacks could poison the network as nodes can join without authentication
-* Adding some testcontainer property tests would be cool!
+* Adding some testcontainer-based property tests would be cool!
 
 ### Disclaimer 
 

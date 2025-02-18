@@ -17,7 +17,11 @@ use pikachu::{
         },
     },
     error::NetworkError,
-    network::{grpc::PeerConfig, node::ChordPeer},
+    network::{
+        grpc::{client::ChordGrpcClient, PeerConfig},
+        messages::chord::{GetRequest, PutRequest},
+        node::ChordPeer,
+    },
 };
 use std::collections::HashMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
@@ -98,6 +102,29 @@ enum Commands {
         /// Bootstrap node host (default: 127.0.0.1)
         #[arg(short = 'n', long = "host", default_value = "127.0.0.1")]
         host: String,
+    },
+    /// Store a key-value pair in the DHT
+    #[command(name = "put")]
+    Put {
+        /// Local gRPC port for this node
+        #[arg(short = 'p', long = "port")]
+        port: u16,
+        /// Key to store
+        #[arg(short = 'k', long = "key")]
+        key: String,
+        /// Value to store
+        #[arg(short = 'v', long = "value")]
+        value: String,
+    },
+    /// Retrieve a value from the DHT by key
+    #[command(name = "get")]
+    Get {
+        /// Local gRPC port for this node
+        #[arg(short = 'p', long = "port")]
+        port: u16,
+        /// Key to retrieve
+        #[arg(short = 'k', long = "key")]
+        key: String,
     },
 }
 
@@ -190,6 +217,65 @@ async fn main() -> Result<(), String> {
 
             info!("Node shut down gracefully");
             Ok(())
+        }
+        Commands::Put { port, key, value } => {
+            let node_addr = SocketAddr::new(LOCALHOST, port);
+            info!("Connecting to node at {}", node_addr);
+
+            // Create gRPC client
+            let mut client = ChordGrpcClient::new(to_grpc_url(node_addr))
+                .await
+                .map_err(|e| format!("Failed to connect to node: {}", e))?;
+
+            // Send put request
+            match client
+                .put(PutRequest {
+                    key: key.as_bytes().to_vec(),
+                    value: value.as_bytes().to_vec(),
+                    requesting_node: None,
+                })
+                .await {
+                    Ok(()) => {
+                        info!("Successfully stored key-value pair");
+                        Ok(())
+                    }
+                    Err(e) => Err(format!("Failed to store key-value pair: {}", e))
+                }
+        }
+        Commands::Get { port, key } => {
+            let node_addr = SocketAddr::new(LOCALHOST, port);
+            info!("Connecting to node at {}", node_addr);
+
+            // Create gRPC client
+            let mut client = ChordGrpcClient::new(to_grpc_url(node_addr))
+                .await
+                .map_err(|e| format!("Failed to connect to node: {}", e))?;
+
+            // Send get request
+            match client
+                .get(GetRequest {
+                    key: key.as_bytes().to_vec(),
+                    requesting_node: None,
+                })
+                .await {
+                    Ok(Some(value)) => {
+                        let bytes = value.0.clone();
+                        match String::from_utf8(value.0) {
+                            Ok(value) => {
+                                info!("Value for key '{}': {}", key, value);
+                                Ok(())
+                            }
+                            Err(_) => {
+                                info!("Value for key '{}' (binary): {:?}", key, bytes);
+                                Ok(())
+                            }
+                        }
+                    }
+                    Ok(None) => {
+                        Err(format!("Key '{}' not found", key))
+                    }
+                    Err(e) => Err(format!("Failed to get value: {}", e))
+                }
         }
     }
 }

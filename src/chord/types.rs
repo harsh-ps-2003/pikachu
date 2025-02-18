@@ -849,7 +849,13 @@ impl ChordNode {
     }
 
     pub async fn find_successor(&self, id: NodeId) -> Result<NodeId, ChordError> {
+        // First check if we're the only node in the network
         let successor_list = self.successor_list.lock().await;
+        if successor_list.len() == 1 && successor_list[0] == self.node_id {
+            return Ok(self.node_id);
+        }
+
+        // Check if the id is between us and our immediate successor
         if let Some(successor) = successor_list.first() {
             if id.is_between(&self.node_id, successor) {
                 return Ok(*successor);
@@ -860,36 +866,30 @@ impl ChordNode {
         // Otherwise, forward to closest preceding node
         if let Some(closest) = self.closest_preceding_node(&id.to_bytes()).await {
             if closest == self.node_id {
-                // If we're the closest, return our successor
+                // If we're the closest, return our immediate successor
                 let successor_list = self.successor_list.lock().await;
-                return successor_list
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| ChordError::NodeNotFound("No successor found".into()));
-            }
-
-            // Forward the query to the closest preceding node
-            if let Some(addr) = self.get_node_address(&closest).await {
-                let mut client = ChordGrpcClient::new(addr).await.map_err(|e| {
-                    ChordError::OperationFailed(format!("Failed to connect: {}", e))
-                })?;
-
-                // Get the node info from the response
-                let node_info = client
-                    .find_successor(id.to_bytes().to_vec())
-                    .await
-                    .map_err(|e| {
-                        ChordError::OperationFailed(format!("Failed to find successor: {}", e))
-                    })?;
-
-                // Convert NodeInfo to NodeId
-                return Ok(NodeId::from_bytes(&node_info.node_id));
+                if let Some(&successor) = successor_list.first() {
+                    return Ok(successor);
+                }
+            } else {
+                // Forward the request to the closest preceding node
+                if let Some(addr) = self.get_node_address(&closest).await {
+                    match ChordGrpcClient::new(addr).await {
+                        Ok(mut client) => {
+                            return client.find_successor(id.to_bytes().to_vec())
+                                .await
+                                .map_err(|e| ChordError::OperationFailed(format!("Failed to forward find_successor: {}", e)))
+                                .map(|node_info| NodeId::from_bytes(&node_info.node_id));
+                        }
+                        Err(e) => {
+                            return Err(ChordError::OperationFailed(format!("Failed to connect to closest preceding node: {}", e)));
+                        }
+                    }
+                }
             }
         }
 
-        Err(ChordError::NodeNotFound(
-            "No suitable successor found".into(),
-        ))
+        Err(ChordError::NodeNotFound(format!("No suitable successor found for id {}", id)))
     }
 }
 

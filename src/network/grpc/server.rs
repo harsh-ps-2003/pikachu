@@ -65,67 +65,121 @@ impl ChordNodeService for ChordGrpcServer {
         }
     }
 
-    async fn get(&self, request: Request<GetRequest>) -> Result<Response<GetResponse>, Status> {
+    async fn get(
+        &self,
+        request: Request<GetRequest>,
+    ) -> Result<Response<GetResponse>, Status> {
         let req = request.into_inner();
-        let key = req.key;
+        let key = Key(req.key);
 
-        debug!("Received get request for key: {:?}", key);
+        // First check if we own the key
+        let key_id = NodeId::from_key(&key.0);
+        match self.node.find_successor(key_id).await {
+            Ok(responsible_node) => {
+                if responsible_node == self.node.node_id {
+                    // We are responsible for this key
+                    let storage = self.node.storage.lock().await;
+                    match storage.get(&key) {
+                        Some(value) => Ok(Response::new(GetResponse {
+                            value: value.0.clone(),
+                            success: true,
+                            error: String::new(),
+                        })),
+                        None => Ok(Response::new(GetResponse {
+                            value: Vec::new(),
+                            success: false,
+                            error: "Key not found".to_string(),
+                        })),
+                    }
+                } else {
+                    // Forward to responsible node
+                    let addr = self.node.get_node_address(&responsible_node).await
+                        .ok_or_else(|| Status::internal("Responsible node address not found"))?;
 
-        // Use the lookup_key method to find the value
-        match self.node.lookup_key(&key).await {
-            Ok(Some(value)) => {
-                debug!("Found value for key");
-                Ok(Response::new(GetResponse {
-                    success: true,
-                    value: value.0,
-                    error: String::new(),
-                }))
+                    let mut client = ChordGrpcClient::new(addr)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to connect to responsible node: {}", e)))?;
+
+                    match client.get(GetRequest {
+                        key: key.0,
+                        requesting_node: req.requesting_node,
+                    }).await {
+                        Ok(Some(value)) => Ok(Response::new(GetResponse {
+                            value: value.0,
+                            success: true,
+                            error: String::new(),
+                        })),
+                        Ok(None) => Ok(Response::new(GetResponse {
+                            value: Vec::new(),
+                            success: false,
+                            error: "Key not found".to_string(),
+                        })),
+                        Err(e) => Ok(Response::new(GetResponse {
+                            value: Vec::new(),
+                            success: false,
+                            error: e.to_string(),
+                        })),
+                    }
+                }
             }
-            Ok(None) => {
-                debug!("Key not found");
-                Ok(Response::new(GetResponse {
-                    success: false,
-                    value: Vec::new(),
-                    error: "Key not found".to_string(),
-                }))
-            }
-            Err(e) => {
-                error!("Lookup failed: {}", e);
-                Err(Status::internal(format!("Lookup failed: {}", e)))
-            }
+            Err(e) => Ok(Response::new(GetResponse {
+                value: Vec::new(),
+                success: false,
+                error: e.to_string(),
+            })),
         }
     }
 
-    async fn put(&self, request: Request<PutRequest>) -> Result<Response<PutResponse>, Status> {
+    async fn put(
+        &self,
+        request: Request<PutRequest>,
+    ) -> Result<Response<PutResponse>, Status> {
         let req = request.into_inner();
-        let key = req.key;
-        let value = req.value;
+        let key = Key(req.key);
+        let value = Value(req.value);
 
-        debug!("Received put request for key: {:?}", key);
+        // First check if we own the key
+        let key_id = NodeId::from_key(&key.0);
+        match self.node.find_successor(key_id).await {
+            Ok(responsible_node) => {
+                if responsible_node == self.node.node_id {
+                    // We are responsible for this key
+                    let mut storage = self.node.storage.lock().await;
+                    storage.insert(key, value);
+                    Ok(Response::new(PutResponse {
+                        success: true,
+                        error: String::new(),
+                    }))
+                } else {
+                    // Forward to responsible node
+                    let addr = self.node.get_node_address(&responsible_node).await
+                        .ok_or_else(|| Status::internal("Responsible node address not found"))?;
 
-        // Check if we own the key
-        if !self.node.owns_key(&key).await {
-            // Forward to the appropriate node
-            match self.node.lookup_key(&key).await {
-                Ok(_) => {
-                    // The key exists somewhere, but we don't own it
-                    return Err(Status::failed_precondition("Key belongs to another node"));
-                }
-                Err(e) => {
-                    error!("Failed to check key ownership: {}", e);
-                    return Err(Status::internal("Failed to check key ownership"));
+                    let mut client = ChordGrpcClient::new(addr)
+                        .await
+                        .map_err(|e| Status::internal(format!("Failed to connect to responsible node: {}", e)))?;
+
+                    match client.put(PutRequest {
+                        key: key.0,
+                        value: value.0,
+                        requesting_node: req.requesting_node,
+                    }).await {
+                        Ok(()) => Ok(Response::new(PutResponse {
+                            success: true,
+                            error: String::new(),
+                        })),
+                        Err(e) => Ok(Response::new(PutResponse {
+                            success: false,
+                            error: e.to_string(),
+                        })),
+                    }
                 }
             }
+            Err(e) => Ok(Response::new(PutResponse {
+                success: false,
+                error: e.to_string(),
+            })),
         }
-
-        // Store the key-value pair
-        let mut storage = self.node.storage.lock().await;
-        storage.insert(Key(key), Value(value));
-
-        Ok(Response::new(PutResponse {
-            success: true,
-            error: String::new(),
-        }))
     }
 
     async fn join(&self, request: Request<JoinRequest>) -> Result<Response<JoinResponse>, Status> {
@@ -326,20 +380,6 @@ impl ChordNodeService for ChordGrpcServer {
         let req = request.into_inner();
         let id = NodeId::from_bytes(&req.id);
 
-        // If we're the only node in the network, we're the successor
-        let successor_list = self.config.successor_list.lock().await;
-        if successor_list.len() == 1 && successor_list[0] == self.node.node_id {
-            return Ok(Response::new(FindSuccessorResponse {
-                successor: Some(NodeInfo {
-                    node_id: self.node.node_id.to_bytes().to_vec(),
-                    address: self.config.local_addr.clone(),
-                }),
-                success: true,
-                error: String::new(),
-            }));
-        }
-        drop(successor_list);
-
         match self.node.find_successor(id).await {
             Ok(successor) => {
                 let addr = self
@@ -357,27 +397,11 @@ impl ChordNodeService for ChordGrpcServer {
                     error: String::new(),
                 }))
             }
-            Err(_) => {
-                // If we can't find a successor, and we're the bootstrap node,
-                // we should be the successor
-                let successor_list = self.config.successor_list.lock().await;
-                if successor_list.len() == 1 && successor_list[0] == self.node.node_id {
-                    Ok(Response::new(FindSuccessorResponse {
-                        successor: Some(NodeInfo {
-                            node_id: self.node.node_id.to_bytes().to_vec(),
-                            address: self.config.local_addr.clone(),
-                        }),
-                        success: true,
-                        error: String::new(),
-                    }))
-                } else {
-                    Ok(Response::new(FindSuccessorResponse {
-                        successor: None,
-                        success: false,
-                        error: "No successor found".to_string(),
-                    }))
-                }
-            }
+            Err(e) => Ok(Response::new(FindSuccessorResponse {
+                successor: None,
+                success: false,
+                error: e.to_string(),
+            })),
         }
     }
 

@@ -5,12 +5,12 @@ use crate::network::messages::chord::{
 use crate::{
     chord::types::{ChordNode, Key, NodeId, Value},
     chord::{FINGER_TABLE_SIZE, SUCCESSOR_LIST_SIZE},
-    error::ChordError,
+    error::{ChordError, NetworkError},
 };
 use log::{debug, error, info, warn};
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot, Mutex};
 
 /// Actor Messages
@@ -66,10 +66,18 @@ pub enum ChordMessage {
     },
 }
 
+/// Cached gRPC client with timestamp for expiry
+struct CachedClient {
+    client: Arc<Mutex<ChordGrpcClient>>,
+    last_used: Instant,
+}
+
 /// The Actor responsible for handling chord messages
 pub struct ChordActor {
     node: ChordNode,
     receiver: mpsc::Receiver<ChordMessage>,
+    // Client connection pool
+    client_pool: Arc<Mutex<HashMap<NodeId, CachedClient>>>,
 }
 
 impl ChordActor {
@@ -81,14 +89,15 @@ impl ChordActor {
         Self {
             node: ChordNode::new(node_id, addr).await,
             receiver,
+            client_pool: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
     pub async fn run(&mut self) {
         let mut stabilize_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
         let mut fix_fingers_interval = tokio::time::interval(tokio::time::Duration::from_secs(60));
-        let mut check_predecessor_interval =
-            tokio::time::interval(tokio::time::Duration::from_secs(30));
+        let mut check_predecessor_interval = tokio::time::interval(tokio::time::Duration::from_secs(30));
+        let mut cleanup_interval = tokio::time::interval(tokio::time::Duration::from_secs(300)); // 5 minutes
 
         loop {
             tokio::select! {
@@ -103,6 +112,9 @@ impl ChordActor {
                 }
                 _ = check_predecessor_interval.tick() => {
                     self.check_predecessor().await;
+                }
+                _ = cleanup_interval.tick() => {
+                    self.cleanup_client_pool().await;
                 }
             }
         }
@@ -201,36 +213,7 @@ impl ChordActor {
 
     /// Finding the immediate responsible node for a key
     async fn find_successor(&self, id: NodeId) -> Result<NodeId, ChordError> {
-        let successor_list = self.node.successor_list.lock().await;
-        if let Some(successor) = successor_list.first() {
-            if self.is_between(&id, &self.node.node_id, successor) {
-                return Ok(*successor);
-            }
-        }
-        drop(successor_list);
-
-        // Otherwise, forward to closest preceding node
-        let n0 = self.closest_preceding_node(id).await;
-        if n0 == self.node.node_id {
-            return Err(ChordError::NodeNotFound(format!(
-                "No suitable successor found for id {}",
-                id
-            )));
-        }
-        Ok(n0)
-    }
-
-    async fn closest_preceding_node(&self, id: NodeId) -> NodeId {
-        let finger_table = self.node.finger_table.lock().await;
-        for i in (0..FINGER_TABLE_SIZE).rev() {
-            if let Some(finger) = finger_table.entries[i].node {
-                if self.is_between(&finger, &self.node.node_id, &id) {
-                    return finger;
-                }
-            }
-        }
-        drop(finger_table);
-        self.node.node_id
+        self.node.find_successor(id).await
     }
 
     async fn notify(&mut self, node: NodeId, node_addr: String) -> Result<(), ChordError> {
@@ -284,8 +267,9 @@ impl ChordActor {
     async fn stabilize(&mut self) -> Result<(), ChordError> {
         if let Some(successor) = self.node.get_successor().await {
             if let Some(successor_addr) = self.node.get_node_address(&successor).await {
-                match ChordGrpcClient::new(successor_addr).await {
-                    Ok(mut client) => {
+                match self.get_or_create_client(successor).await {
+                    Ok(client) => {
+                        let mut client = client.lock().await;
                         // Successor is alive, proceed with stabilization
                         // ... existing stabilization logic ...
                     }
@@ -329,9 +313,60 @@ impl ChordActor {
         }
     }
 
+    // Client pool management methods
+    async fn get_or_create_client(&self, node: NodeId) -> Result<Arc<Mutex<ChordGrpcClient>>, ChordError> {
+        const CLIENT_EXPIRY: Duration = Duration::from_secs(300); // 5 minutes
+        
+        let mut pool = self.client_pool.lock().await;
+        
+        // Check if we have a valid cached client
+        if let Some(cached) = pool.get(&node) {
+            if cached.last_used.elapsed() < CLIENT_EXPIRY {
+                // Client is still valid
+                return Ok(cached.client.clone());
+            }
+        }
+        
+        // Create new client
+        let addr = self.get_node_address(node).await?;
+        match ChordGrpcClient::new(addr).await {
+            Ok(client) => {
+                let client = Arc::new(Mutex::new(client));
+                // Cache the new client
+                pool.insert(node, CachedClient {
+                    client: client.clone(),
+                    last_used: Instant::now(),
+                });
+                Ok(client)
+            }
+            Err(e) => {
+                // Remove failed node from pool
+                pool.remove(&node);
+                Err(ChordError::OperationFailed(format!("Failed to create client: {}", e)))
+            }
+        }
+    }
+
+    async fn cleanup_client_pool(&self) {
+        const CLIENT_EXPIRY: Duration = Duration::from_secs(300); // 5 minutes
+        let mut pool = self.client_pool.lock().await;
+        let now = Instant::now();
+        
+        // Remove expired clients
+        pool.retain(|_, cached| {
+            cached.last_used.elapsed() < CLIENT_EXPIRY
+        });
+    }
+
+    async fn remove_client(&self, node: &NodeId) {
+        let mut pool = self.client_pool.lock().await;
+        pool.remove(node);
+    }
+
+    // Update put method to use Arc<Mutex<ChordGrpcClient>>
     async fn put(&mut self, key: Key, value: Value) -> Result<(), ChordError> {
-        let key_node_id = NodeId::from_key(&key.0);
-        let responsible_node = self.find_successor(key_node_id).await?;
+        let key_id = NodeId::from_key(&key.0);
+        let responsible_node = self.node.find_successor(key_id).await?;
 
         if responsible_node == self.node.node_id {
             // We are responsible for this key
@@ -339,61 +374,56 @@ impl ChordActor {
             storage.insert(key, value);
             Ok(())
         } else {
-            // Forward the request to the responsible node using gRPC
-            let mut client = self.create_grpc_client(responsible_node).await?;
+            // Get or create client for responsible node
+            let client = self.get_or_create_client(responsible_node).await?;
+            let mut client = client.lock().await;
 
-            let node_addresses = self.node.node_addresses.lock().await;
-            let addr = node_addresses
-                .get(&self.node.node_id)
-                .ok_or_else(|| ChordError::NodeNotFound("No address found".into()))?
-                .clone();
-
-            client
-                .put(PutRequest {
-                    key: key.0,
-                    value: value.0,
-                    requesting_node: Some(NodeInfo {
-                        node_id: self.node.node_id.to_bytes().to_vec(),
-                        address: addr,
-                    }),
-                })
-                .await;
-
-            Ok(())
+            match client.put(PutRequest {
+                key: key.0,
+                value: value.0,
+                requesting_node: Some(NodeInfo {
+                    node_id: self.node.node_id.to_bytes().to_vec(),
+                    address: self.node.local_addr.clone(),
+                }),
+            }).await {
+                Ok(_) => Ok(()),
+                Err(e) => {
+                    // Remove failed client from pool
+                    self.remove_client(&responsible_node).await;
+                    Err(ChordError::OperationFailed(format!("Failed to forward put request: {}", e)))
+                }
+            }
         }
     }
 
+    // Update get method to use Arc<Mutex<ChordGrpcClient>>
     async fn get(&self, key: &Key) -> Result<Option<Value>, ChordError> {
-        let key_node_id = NodeId::from_key(&key.0);
-        let responsible_node = self.find_successor(key_node_id).await?;
+        let key_id = NodeId::from_key(&key.0);
+        let responsible_node = self.node.find_successor(key_id).await?;
 
         if responsible_node == self.node.node_id {
-            // We are responsible for this key
+            // We own this key, check our storage
             let storage = self.node.storage.lock().await;
             Ok(storage.get(key).cloned())
         } else {
-            // Forward the request to the responsible node using gRPC
-            let mut client = self.create_grpc_client(responsible_node).await?;
+            // Get or create client for responsible node
+            let client = self.get_or_create_client(responsible_node).await?;
+            let mut client = client.lock().await;
 
-            let node_addresses = self.node.node_addresses.lock().await;
-            let addr = node_addresses
-                .get(&self.node.node_id)
-                .ok_or_else(|| ChordError::NodeNotFound("No address found".into()))?
-                .clone();
-            drop(node_addresses); // Release the lock early
-
-            let response = client
-                .get(GetRequest {
-                    key: key.0.clone(),
-                    requesting_node: Some(NodeInfo {
-                        node_id: self.node.node_id.to_bytes().to_vec(),
-                        address: addr,
-                    }),
-                })
-                .await
-                .map_err(|e| ChordError::OperationFailed(format!("Get request failed: {}", e)))?;
-
-            Ok(response.map(|value| Value(value.0)))
+            match client.get(GetRequest {
+                key: key.0.clone(),
+                requesting_node: Some(NodeInfo {
+                    node_id: self.node.node_id.to_bytes().to_vec(),
+                    address: self.node.local_addr.clone(),
+                }),
+            }).await {
+                Ok(response) => Ok(response.map(|value| Value(value.0))),
+                Err(e) => {
+                    // Remove failed client from pool
+                    self.remove_client(&responsible_node).await;
+                    Err(ChordError::OperationFailed(format!("Failed to forward get request: {}", e)))
+                }
+            }
         }
     }
 
@@ -433,7 +463,8 @@ impl ChordActor {
 
         // Send keys to the new responsible node
         if !keys_to_transfer.is_empty() {
-            let mut client = self.create_grpc_client(to).await?;
+            let client = self.create_grpc_client(to).await?;
+            let mut client_guard = client.lock().await;
 
             // Convert keys to KeyValue proto messages
             let kv_data: Vec<KeyValue> = keys_to_transfer
@@ -445,7 +476,7 @@ impl ChordActor {
                 .collect();
 
             // Send ReplicateRequest via gRPC
-            client
+            client_guard
                 .replicate(ReplicateRequest {
                     data: kv_data,
                     source_node: Some(NodeInfo {
@@ -468,6 +499,9 @@ impl ChordActor {
 
     async fn handle_node_departure(&mut self, node: NodeId) {
         debug!("Handling departure of node {}", node);
+
+        // Remove client from pool
+        self.remove_client(&node).await;
 
         // Remove from node addresses with proper cleanup
         {
@@ -540,9 +574,10 @@ impl ChordActor {
                             retry_count + 1
                         );
 
-                        match ChordGrpcClient::new(next_addr).await {
-                            Ok(mut client) => {
-                                match client.stabilize().await {
+                        match self.get_or_create_client(next_successor).await {
+                            Ok(client) => {
+                                let mut client_guard = client.lock().await;
+                                match client_guard.stabilize().await {
                                     Ok(_) => {
                                         debug!(
                                             "Successfully stabilized with new successor {}",
@@ -619,8 +654,9 @@ impl ChordActor {
             // Attempt to stabilize with each potential successor
             for &potential_successor in successor_list.iter() {
                 if let Some(addr) = self.node.get_node_address(&potential_successor).await {
-                    if let Ok(mut client) = ChordGrpcClient::new(addr).await {
-                        if client.stabilize().await.is_ok() {
+                    if let Ok(client) = self.get_or_create_client(potential_successor).await {
+                        let mut client_guard = client.lock().await;
+                        if client_guard.stabilize().await.is_ok() {
                             debug!(
                                 "Emergency stabilization successful with node {}",
                                 potential_successor
@@ -653,8 +689,9 @@ impl ChordActor {
         // Now try each node without holding the finger table lock
         for node in potential_nodes {
             if let Some(addr) = self.node.get_node_address(&node).await {
-                if let Ok(mut client) = ChordGrpcClient::new(addr).await {
-                    if let Ok(pred_resp) = client.get_predecessor().await {
+                if let Ok(client) = self.get_or_create_client(node).await {
+                    let mut client_guard = client.lock().await;
+                    if let Ok(pred_resp) = client_guard.get_predecessor().await {
                         if let Some(pred_info) = pred_resp.predecessor {
                             let pred_id = NodeId::from_bytes(&pred_info.node_id);
                             let mut predecessor = self.node.predecessor.lock().await;
@@ -709,7 +746,7 @@ impl ChordActor {
             // Verify immediate successor is reachable
             if let Some(&immediate_successor) = successor_list.first() {
                 if let Some(addr) = self.node.get_node_address(&immediate_successor).await {
-                    if let Err(e) = ChordGrpcClient::new(addr).await {
+                    if let Err(e) = self.get_or_create_client(immediate_successor).await {
                         error!("Invalid state: Immediate successor unreachable: {}", e);
                         drop(successor_list);
                         self.handle_immediate_successor_failure(immediate_successor)
@@ -728,7 +765,7 @@ impl ChordActor {
             for (i, entry) in finger_table.entries.iter().enumerate() {
                 if let Some(node) = entry.node {
                     if let Some(addr) = self.node.get_node_address(&node).await {
-                        if let Err(_) = ChordGrpcClient::new(addr).await {
+                        if let Err(_) = self.get_or_create_client(node).await {
                             debug!(
                                 "Invalid finger table entry {} pointing to unreachable node {}",
                                 i, node
@@ -749,12 +786,8 @@ impl ChordActor {
     }
 
     // When creating gRPC client, extract host and port from multiaddr
-    async fn create_grpc_client(&self, node: NodeId) -> Result<ChordGrpcClient, ChordError> {
-        let addr = self.get_node_address(node).await?;
-
-        ChordGrpcClient::new(addr)
-            .await
-            .map_err(|e| ChordError::InvalidRequest(format!("Failed to create gRPC client: {}", e)))
+    async fn create_grpc_client(&self, node: NodeId) -> Result<Arc<Mutex<ChordGrpcClient>>, ChordError> {
+        self.get_or_create_client(node).await
     }
 
     fn should_track_node(&self, node_id: &NodeId) -> bool {
@@ -779,14 +812,14 @@ impl ChordActor {
 
             // Get successors of our successor until list is full
             while new_list.len() < SUCCESSOR_LIST_SIZE {
-                match self.create_grpc_client(current).await {
-                    Ok(mut client) => {
-                        match client.get_successor_list().await {
+                match self.get_or_create_client(current).await {
+                    Ok(client) => {
+                        let mut client_guard = client.lock().await;
+                        match client_guard.get_successor_list().await {
                             Ok(successors) => {
                                 for succ_info in successors {
                                     let succ_id = NodeId::from_bytes(&succ_info.node_id);
-                                    if !new_list.contains(&succ_id) && succ_id != self.node.node_id
-                                    {
+                                    if !new_list.contains(&succ_id) && succ_id != self.node.node_id {
                                         new_list.push(succ_id);
 
                                         // Update node address
@@ -834,7 +867,8 @@ impl ChordActor {
         to_node: NodeId,
     ) -> Result<(), ChordError> {
         if let Some(node_addr) = self.node.get_node_address(&to_node).await {
-            let mut client = self.create_grpc_client(to_node).await?;
+            let client = self.create_grpc_client(to_node).await?;
+            let mut client_guard = client.lock().await;
 
             let kv_data = keys_to_transfer
                 .into_iter()
@@ -845,7 +879,7 @@ impl ChordActor {
                 .collect::<Vec<_>>();
 
             // Send ReplicateRequest via gRPC
-            client
+            client_guard
                 .replicate(ReplicateRequest {
                     data: kv_data,
                     source_node: Some(NodeInfo {
@@ -872,8 +906,8 @@ impl ChordActor {
 
         // If we don't own it, find the closest preceding node or immediate successor
         let next_hop = {
-            let closest = self.closest_preceding_node(key_id).await;
-            if closest == self.node.node_id {
+            let closest = self.node.closest_preceding_node(&key_id.to_bytes()).await;
+            if closest == Some(self.node.node_id) {
                 // If closest is self, use immediate successor
                 let successor_list = self.node.successor_list.lock().await;
                 let next = successor_list
@@ -882,13 +916,16 @@ impl ChordActor {
                     .ok_or_else(|| ChordError::NodeNotFound("No route to key".into()))?;
                 drop(successor_list);
                 next
+            } else if let Some(node) = closest {
+                node
             } else {
-                closest
+                return Err(ChordError::NodeNotFound("No route to key".into()));
             }
         };
 
         // Forward the lookup to the next hop
-        let mut client = self.create_grpc_client(next_hop).await?;
+        let client = self.create_grpc_client(next_hop).await?;
+        let mut client = client.lock().await;
 
         let response = client
             .get(GetRequest {
