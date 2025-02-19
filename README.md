@@ -1,10 +1,10 @@
 # Pikachu 
 
-An asynchronous multi-dimensional non-persistent in-memory Byzantine Fault Tolerant Distributed Hash Table implementation.
+An asynchronous multi-dimensional in-memory non-persistent Distributed Hash Table implementation.
 
 ### Demo
 
-To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p <NODE_PORT>`. The nodes will automatically detect each other, and start forming the chord network. Take a look at `<NODE_PORT>.log` files for the logs. 
+To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p <NODE_PORT>`. The nodes will automatically detect each other, and start forming the chord network. Take a look at `<NODE_PORT>.log` files for the logs.
 
 To put the key-value pair in the DHT use `cargo run -p <NODE_PORT> -k <KEY> -v <VALUE>` and similarly to get it back from DHT use `cargo run get -p <NODE_PORT> -k <KEY>`.
 
@@ -52,9 +52,9 @@ Disadvantages
 
     If nodes are overloaded, they might become bottlenecks when processing multiple lookup requests.
 
-### Something extra...
+<!-- ### Something extra...
 
-This is a very close implementation of the infamous Chord DHT with a twist, I have made it BFT using SMPC protocol.
+This is a very close implementation of the infamous Chord DHT with a twist, I have made it BFT using SMPC protocol. -->
 
 ### Reference
 
@@ -66,6 +66,7 @@ Thanks to the authors of these wonderful research papers for inspiring me for th
 * [Atomic Data Access in DHTs](https://groups.csail.mit.edu/tds/papers/Lynch/lncs02.pdf)
 * [Making Chord Robust to Byzantine Attacks](https://www.cs.unm.edu/~saia/papers/swarm.pdf)
 * [Towards Practical Communication in Byzantine-Resistant DHTs](https://www.cs.purdue.edu/homes/akate/publications/RobustP2P.pdf)
+* [A survey of DHT security](https://dl.acm.org/doi/pdf/10.1145/1883612.1883615)
 * [Building p2p systems with Chord, a Distributed Lookup Service](https://www.cs.princeton.edu/courses/archive/spr05/cos598E/bib/dabek-chord.pdf)
 * [Comparing Performance of DHTs under churn](https://pdos.csail.mit.edu/~strib/docs/dhtcomparison/dhtcomparison-iptps04.pdf)
 * [Design and Analysis in Structures p2p systems](https://dcatkth.github.io/thesis/sameh_thesis.pdf)
@@ -74,8 +75,10 @@ Thanks to the authors of these wonderful research papers for inspiring me for th
 
 Some cool things that can be further done :
 
+* Make this CFT via proper replication factor
 * Enable TLS in gRPC communication for better security
-* Make this BFT DHT privacy-preserving as well - [Add Query Privacy to Robust DHTs](https://arxiv.org/pdf/1107.1072)
+* Make this BFT
+* Make this DHT privacy-preserving as well - [Add Query Privacy to Robust DHTs](https://arxiv.org/pdf/1107.1072)
 That would be cool :)
 * Sybil attacks could poison the network as nodes can join without authentication
 * Adding some testcontainer-based property tests would be cool!
