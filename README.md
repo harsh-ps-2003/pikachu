@@ -4,9 +4,14 @@ An asynchronous multi-dimensional in-memory non-persistent Distributed Hash Tabl
 
 ### Demo
 
-To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`. Then join this bootstrap node to make a chord network `cargo run join -b 8001 -p <NODE_PORT>`. The nodes will automatically detect each other, and start forming the chord network. Take a look at `<NODE_PORT>.log` files for the logs.
+To start the bootstrap node, run `cargo run start-bootstrap -p <BOOTSTRAP_NODE_PORT>`. If the port `-p` is omitted, a random available port might be used. Check whether the bootstrap node is working properly or not by curling the gRPC server of the bootstrap node `lsof -i :<NODE_PORT>`.
 
-To put the key-value pair in the DHT use `cargo run -p <NODE_PORT> -k <KEY> -v <VALUE>` and similarly to get it back from DHT use `cargo run get -p <NODE_PORT> -k <KEY>`.
+Then join this bootstrap node to make a chord network `cargo run join -b <BOOTSTRAP_NODE_PORT> -p <NODE_PORT>`. Similar to starting, if the local port `-p` is omitted, a random one might be assigned. The nodes will automatically detect each other, and start forming the chord network.
+
+Take a look at `<NODE_PORT>.log` files for the logs. You can control the log verbosity using the `RUST_LOG` environment variable (e.g., `RUST_LOG=debug cargo run ...` for detailed logs, defaults to `info`).
+
+To put the key-value pair in the DHT use `cargo run put -p <NODE_PORT> -k <KEY> -v <VALUE>`. This connects to the node running on `127.0.0.1:<NODE_PORT>`.
+Similarly to get it back from DHT use `cargo run get -p <NODE_PORT> -k <KEY>`.
 
 Just `^C` for graceful shutdown of node, and then close the terminal instance.
 
@@ -16,45 +21,36 @@ And yes, aren't there too many logs when you use `RUST_LOG=debug` with the comma
 
 ### System Design
 
-Its not crash fault tolerant.
+> [!WARNING]
+> This implementation is **not crash fault tolerant**. Node failures can lead to data loss or network instability.
 
-The length of the successor/predecessor lists should be typically r=O(logN) but I have kept it a constant 3 because in a local setup, I am not going to spawn that many nodes!
+#### Successor/Predecessor List Size
 
-gRPC handoff -> rx_grpc -> forward_task -> tx_process -> rx_process -> storage
+The Chord protocol typically recommends successor/predecessor list sizes (`r`) on the order of O(log N), where N is the number of nodes. For simplicity in this local development setup, `r` is fixed to a small constant (e.g., 3), as a large number of nodes is not anticipated.
 
-1. Recursive Lookup
-How It Works
+#### Lookup Mechanism
 
-    The querying node sends the request to the closest preceding node (according to the finger table).
-    That node processes the request and forwards it to the next closest node.
-    This process continues until the responsible node is found, which then returns the value.
+This implementation uses **Recursive Lookups** for finding the node responsible for a given key.
 
-Advantages
+**How it Works:**
 
-✅ Lower latency in ideal conditions:
-
-    Since nodes forward the request directly, the lookup can be faster in a low-latency network.
-    The request follows a single path through the network, reducing the number of back-and-forth messages.
-
-✅ Less burden on the querying node:
-
-    The node initiating the request does not need to track intermediate responses.
-    The lookup is handled by the network itself.
-
-Disadvantages
-
-❌ Higher risk of failure propagation:
-
-    If a node along the lookup path fails, the query may be lost.
-    There is no way for the initiating node to retry from the last known node unless redundancy is built in.
-
-❌ Potentially higher network congestion:
-
-    If nodes are overloaded, they might become bottlenecks when processing multiple lookup requests.
+1.  **Initiation:** The querying node identifies the closest preceding node to the target key ID in its finger table.
+2.  **Forwarding:** It sends the lookup request to that node.
+3.  **Processing:** The receiving node checks if *it* is the successor. If not, it finds the closest preceding node in *its* finger table and forwards the request again.
+4.  **Repetition:** This forwarding continues hop-by-hop closer to the target ID.
+5.  **Resolution:** The node ultimately responsible for the key identifies itself and returns the resultback to the node that called it.
+6.  **Return Path:** Each node in the chain then receives this response and forwards it back up the call stack to the node that originally requested it from them. The response effectively retraces the request path in reverse.
 
 <!-- ### Something extra...
 
 This is a very close implementation of the infamous Chord DHT with a twist, I have made it BFT using SMPC protocol. -->
+
+### Things to Further think about...
+
+* Instead of hopping the response back, we should communicate directly. Using the DHT primarily to find the responsible node's address and then communicating directly is often more efficient than having the response hop back through the entire chain.
+* Need a careful review to ensure correctness under various conditions (e.g., joining an empty vs. populated network, concurrent joins).
+* Ensuring that key transfers during joins/stabilization are atomic or at least robust against failures is crucial for data consistency. If any node along the forwarding path fails, the lookup request can be lost. Without built-in retry mechanisms at each hop or by the originator, the request fails.
+* Intermediate nodes handle both their own load and forwarded requests, potentially creating bottlenecks.
 
 ### Reference
 
@@ -81,10 +77,10 @@ Some cool things that can be further done :
 * Make this DHT privacy-preserving as well - [Add Query Privacy to Robust DHTs](https://arxiv.org/pdf/1107.1072)
 That would be cool :)
 * Sybil attacks could poison the network as nodes can join without authentication
-* Adding some testcontainer-based property tests would be cool!
+* Adding some property tests would be cool!
 
 ### Disclaimer 
 
-This project was undertaken to deepen my understanding of decentralized p2p networks after taking the course EE698C at IIT Kanpur.
+This project was undertaken to deepen my understanding of Decentralized P2P networks after taking the course EE698C at IIT Kanpur.
 
 Not designed to be used in production!
