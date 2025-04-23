@@ -41,6 +41,8 @@ This implementation uses **Recursive Lookups** for finding the node responsible 
 5.  **Resolution:** The node ultimately responsible for the key identifies itself and returns the resultback to the node that called it.
 6.  **Return Path:** Each node in the chain then receives this response and forwards it back up the call stack to the node that originally requested it from them. The response effectively retraces the request path in reverse.
 
+To understand in the architecture in detail, [read all the chapters](/architecture/). 
+
 <!-- ### Something extra...
 
 This is a very close implementation of the infamous Chord DHT with a twist, I have made it BFT using SMPC protocol. -->
